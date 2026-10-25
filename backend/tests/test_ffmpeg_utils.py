@@ -200,3 +200,29 @@ def test_run_ffmpeg_with_progress_runs_in_the_given_cwd(tmp_path: Path) -> None:
         on_progress=lambda percent: None,
         cwd=tmp_path,
     )
+
+
+def test_probe_video_reports_whether_audio_exists(sample_video: Path, tmp_path: Path) -> None:
+    assert probe_video(sample_video)["has_audio"] is True
+
+    silent = tmp_path / "silent.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x120:rate=5",
+            "-t",
+            "0.5",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            str(silent),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert probe_video(silent)["has_audio"] is False

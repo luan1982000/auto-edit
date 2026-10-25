@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,10 +24,16 @@ from app.services.ffmpeg_utils import (
     FFmpegError,
     extract_audio,
     make_thumbnail,
+    probe_audio_duration,
     probe_video,
     run_ffmpeg_with_progress,
 )
-from app.services.render import LogoOptions, RenderOptions, build_ffmpeg_command
+from app.services.render import (
+    AUDIO_MODES,
+    LogoOptions,
+    RenderOptions,
+    build_ffmpeg_command,
+)
 from app.services.subtitles import (
     SubtitleData,
     SubtitleError,
@@ -42,6 +49,15 @@ from app.services.transcribe import (
     TranscriptionError,
 )
 from app.services.translate import TranslationError, translate_segments
+from app.services.tts import (
+    EdgeTTSEngine,
+    TTSEngine,
+    TTSError,
+    VoiceClip,
+    build_voice_timeline,
+    validate_rate,
+    validate_voice,
+)
 from app.services.urls import detect_platform
 from app.settings_store import get_or_create_settings
 
@@ -487,6 +503,93 @@ def build_translate_handler(
     return handle
 
 
+def _set_has_voice(session_factory: SessionFactory, video_id: str, value: bool) -> None:
+    with session_factory() as session:
+        video = session.get(Video, video_id)
+        if video is None:
+            return
+        video.has_voice = value
+        session.add(video)
+        session.commit()
+
+
+def build_tts_handler(
+    config: AppConfig,
+    session_factory: SessionFactory,
+    engine: TTSEngine | None = None,
+) -> JobHandler:
+    tts_engine = engine or EdgeTTSEngine()
+
+    def handle(ctx: JobContext) -> None:
+        if not ctx.video_id:
+            raise TTSError("Job tts thiếu video_id")
+        video_dir = (config.videos_dir / ctx.video_id).resolve()
+
+        with session_factory() as session:
+            video = session.get(Video, ctx.video_id)
+            if video is None:
+                raise TTSError("Video không tồn tại trong database")
+            settings = get_or_create_settings(session)
+            voice = validate_voice(
+                str(ctx.params.get("voice") or settings.tts_voice)
+            )
+            rate = validate_rate(str(ctx.params.get("rate") or settings.tts_rate))
+            duration = float(video.duration_sec)
+
+        data = load_subtitle_data(video_dir / "subtitle.json")
+        if data is None or not data.segments:
+            raise TTSError("Video chưa có phụ đề để tạo giọng đọc")
+        segments = [segment for segment in data.segments if segment.text.strip()]
+        if not segments:
+            raise TTSError("Phụ đề không có nội dung để tạo giọng đọc")
+        if duration <= 0:
+            duration = max(segment.end for segment in segments)
+        if duration <= 0:
+            raise TTSError("Không xác định được thời lượng video")
+
+        segment_dir = video_dir / "tts"
+        shutil.rmtree(segment_dir, ignore_errors=True)
+        segment_dir.mkdir(parents=True, exist_ok=True)
+        temporary = video_dir / "voice.tmp.mp3"
+        clips: list[VoiceClip] = []
+
+        try:
+            total = len(segments)
+            for index, segment in enumerate(segments):
+                ctx.check_deadline()
+                ctx.update(
+                    5 + int(index / total * 75),
+                    f"Đang tạo giọng đọc {index + 1}/{total}...",
+                )
+                clip_path = segment_dir / f"seg-{index:04d}.mp3"
+                tts_engine.synthesize(
+                    segment.text, voice, rate, clip_path
+                )
+                ctx.check_deadline()
+                clips.append(
+                    VoiceClip(
+                        path=clip_path,
+                        start=segment.start,
+                        end=segment.end,
+                        duration=probe_audio_duration(clip_path),
+                    )
+                )
+
+            ctx.update(85, "Đang ghép voice.mp3...")
+            build_voice_timeline(clips, temporary, total_duration=duration)
+            temporary.replace(video_dir / "voice.mp3")
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        finally:
+            shutil.rmtree(segment_dir, ignore_errors=True)
+
+        _set_has_voice(session_factory, ctx.video_id, True)
+        ctx.update(100, "Hoàn tất")
+
+    return handle
+
+
 class RenderError(RuntimeError):
     """Raised when a render cannot start or ffmpeg fails."""
 
@@ -510,6 +613,8 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
             duration = video.duration_sec
             logo_enabled = bool(ctx.params.get("logo", True))
             subtitle_enabled = bool(ctx.params.get("subtitle", False))
+            voice_enabled = bool(ctx.params.get("voice", False))
+            audio_mode = str(ctx.params.get("keep_original_audio", "keep"))
             subtitle_font = settings.subtitle_font
             subtitle_size = settings.subtitle_size
             subtitle_position = settings.subtitle_position
@@ -530,6 +635,21 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
             raise RenderError("Chưa có logo hợp lệ — upload logo trong Cài đặt")
         if logo_enabled and (width <= 0 or height <= 0):
             raise RenderError("Chưa có kích thước video để đặt logo")
+        if audio_mode not in AUDIO_MODES:
+            raise RenderError(f"Chế độ âm thanh không hợp lệ: {audio_mode}")
+
+        voice_path: Path | None = None
+        has_original_audio = True
+        if voice_enabled:
+            voice_path = video_dir / "voice.mp3"
+            if not voice_path.is_file():
+                raise RenderError(
+                    "Video chưa có file giọng đọc — tạo giọng đọc trước khi render"
+                )
+            try:
+                has_original_audio = bool(probe_video(source)["has_audio"])
+            except FFmpegError as exc:
+                raise RenderError(f"Không đọc được audio gốc: {exc}") from exc
 
         subtitle_file: str | None = None
         if subtitle_enabled:
@@ -562,6 +682,9 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
                 video_height=height,
                 logo=logo_options,
                 subtitle_file=subtitle_file,
+                voice_path=voice_path,
+                audio_mode=audio_mode,
+                has_original_audio=has_original_audio,
             ),
         )
 
@@ -606,5 +729,6 @@ def default_handlers(config: AppConfig, session_factory: SessionFactory) -> dict
             config, session_factory, transcriber=transcriber
         ),
         "translate": build_translate_handler(config, session_factory),
+        "tts": build_tts_handler(config, session_factory, engine=EdgeTTSEngine()),
         "render": build_render_handler(config, session_factory),
     }

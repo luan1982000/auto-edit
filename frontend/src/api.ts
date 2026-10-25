@@ -206,6 +206,26 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ segments }),
     }),
+  generateVoice: (id: string, options: { voice: string; rate: string }) =>
+    request<Job>(`/api/videos/${id}/tts`, {
+      method: "POST",
+      body: JSON.stringify(options),
+    }),
+  previewTts: async (
+    text: string,
+    voice: string,
+    rate: string,
+  ): Promise<Blob> => {
+    const response = await fetch("/api/tts/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice, rate }),
+    });
+    if (!response.ok) {
+      throw new Error(await readError(response));
+    }
+    return response.blob();
+  },
 
   thumbUrl: (id: string) => `/api/videos/${id}/thumb`,
   fileUrl: (id: string, variant: "original" | "output", version?: number) =>

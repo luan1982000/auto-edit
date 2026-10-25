@@ -13,6 +13,7 @@ import {
 } from "../api";
 import { JobCard } from "../components/JobCard";
 import { SubtitleEditor } from "../components/SubtitleEditor";
+import { VoicePanel } from "../components/VoicePanel";
 import {
   AlertIcon,
   ArrowLeftIcon,
@@ -133,8 +134,17 @@ export function VideoDetail() {
   const [subtitleLoading, setSubtitleLoading] = useState(false);
   const [subtitleSaving, setSubtitleSaving] = useState(false);
   const [subtitleError, setSubtitleError] = useState("");
+  const [ttsVoice, setTtsVoice] = useState("vi-VN-HoaiMyNeural");
+  const [ttsRate, setTtsRate] = useState("+0%");
+  const [previewing, setPreviewing] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
   const subtitleDirtyRef = useRef(false);
   const outputState = useRef({ id: "", has: false });
+  const previousHasVoice = useRef<boolean | null>(null);
+  const voiceTouched = useRef(false);
+  const previewAudio = useRef<{ audio: HTMLAudioElement; url: string } | null>(
+    null,
+  );
 
   useEffect(() => {
     let alive = true;
@@ -182,6 +192,27 @@ export function VideoDetail() {
       window.clearInterval(timer);
     };
   }, [id]);
+
+  useEffect(() => {
+    if (!settings || voiceTouched.current) return;
+    setTtsVoice(settings.tts_voice);
+    setTtsRate(settings.tts_rate);
+  }, [settings]);
+
+  useEffect(() => {
+    if (!video) return;
+    if (previousHasVoice.current === false && video.has_voice) {
+      setOptionsTouched(true);
+      setOptions((current) => ({
+        ...current,
+        voice: true,
+        keep_original_audio: "duck",
+      }));
+    }
+    previousHasVoice.current = video.has_voice;
+  }, [video]);
+
+  useEffect(() => () => stopVoicePreview(), []);
 
   useEffect(() => {
     if (!video || !settings || optionsTouched) return;
@@ -379,6 +410,86 @@ export function VideoDetail() {
     }
   }
 
+  function stopVoicePreview() {
+    const current = previewAudio.current;
+    if (!current) return;
+    current.audio.pause();
+    URL.revokeObjectURL(current.url);
+    previewAudio.current = null;
+  }
+
+  function releasePreview(audio: HTMLAudioElement, url: string) {
+    audio.pause();
+    URL.revokeObjectURL(url);
+    if (previewAudio.current?.audio === audio) {
+      previewAudio.current = null;
+    }
+  }
+
+  function changeTtsVoice(value: string) {
+    voiceTouched.current = true;
+    setTtsVoice(value);
+    setVoiceError("");
+    stopVoicePreview();
+  }
+
+  function changeTtsRate(value: string) {
+    voiceTouched.current = true;
+    setTtsRate(value);
+    setVoiceError("");
+    stopVoicePreview();
+  }
+
+  async function handlePreviewVoice() {
+    const text = subtitleDraft.find((segment) => segment.text.trim());
+    if (!text) {
+      setVoiceError("Chưa có câu phụ đề để nghe thử");
+      return;
+    }
+    stopVoicePreview();
+    setPreviewing(true);
+    setVoiceError("");
+    try {
+      const blob = await api.previewTts(text.text.trim(), ttsVoice, ttsRate);
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      previewAudio.current = { audio, url };
+      audio.onended = () => releasePreview(audio, url);
+      audio.onerror = () => {
+        releasePreview(audio, url);
+        setVoiceError("Không phát được audio nghe thử");
+      };
+      await audio.play();
+    } catch (error) {
+      stopVoicePreview();
+      setVoiceError(
+        error instanceof Error ? error.message : "Không tạo được audio nghe thử",
+      );
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function handleGenerateVoice() {
+    if (!video) return;
+    if (subtitleDirtyRef.current) {
+      setVoiceError("Lưu thay đổi phụ đề trước khi tạo giọng đọc");
+      return;
+    }
+    setVoiceError("");
+    try {
+      const job = await api.generateVoice(video.id, {
+        voice: ttsVoice,
+        rate: ttsRate,
+      });
+      trackJob(job);
+    } catch (error) {
+      setVoiceError(
+        error instanceof Error ? error.message : "Không bắt đầu được job giọng đọc",
+      );
+    }
+  }
+
   async function handleDelete() {
     if (!video) return;
     const confirmed = window.confirm(
@@ -467,6 +578,9 @@ export function VideoDetail() {
     (pendingJob?.status === "failed" ? pendingJob : null);
   const subtitleBusy =
     activeJob?.type === "transcribe" || activeJob?.type === "translate";
+  const voiceBusy = activeJob?.type === "tts";
+  const previewText =
+    subtitleDraft.find((segment) => segment.text.trim())?.text.trim() ?? "";
   const outputUrl = api.fileUrl(video.id, "output", outputVersion);
   const renderDisabled =
     startingRender || activeJob !== null || video.status !== "ready";
@@ -602,6 +716,26 @@ export function VideoDetail() {
             onSave={() => void handleSaveSubtitle()}
             onTranscribe={(translate) => void handleTranscribe(translate)}
             onTranslate={() => void handleTranslate()}
+          />
+
+          <VoicePanel
+            hasSubtitle={video.has_subtitle}
+            hasVoice={video.has_voice}
+            dirty={subtitleDirty}
+            voice={ttsVoice}
+            rate={ttsRate}
+            previewText={previewText}
+            previewing={previewing}
+            busy={voiceBusy}
+            disabled={
+              video.status !== "ready" ||
+              (activeJob !== null && activeJob.type !== "tts")
+            }
+            error={voiceError}
+            onVoiceChange={changeTtsVoice}
+            onRateChange={changeTtsRate}
+            onPreview={() => void handlePreviewVoice()}
+            onGenerate={() => void handleGenerateVoice()}
           />
         </div>
 

@@ -13,6 +13,7 @@ import {
   SpinnerIcon,
   TrashIcon,
 } from "../components/Icons";
+import { TTS_VOICES } from "../lib/voices";
 
 const inputClass =
   "w-full rounded-xl border border-line bg-ink/60 px-3 py-2 text-[13px] text-zinc-100 outline-none transition focus:border-acid/50 focus:ring-2 focus:ring-acid/10";
@@ -431,8 +432,11 @@ export function SettingsPage() {
             value={form.tts_voice}
             onChange={(event) => update("tts_voice", event.target.value)}
           >
-            <option value="vi-VN-HoaiMyNeural">HoaiMy (nữ)</option>
-            <option value="vi-VN-NamMinhNeural">NamMinh (nam)</option>
+            {TTS_VOICES.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
           </select>
         </Field>
         <Field label="Tốc độ" hint="Ví dụ: +0%, +10%, -10%">

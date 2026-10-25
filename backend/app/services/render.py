@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LOGO_POSITIONS = ("tl", "tr", "bl", "br")
+AUDIO_MODES = ("mute", "duck", "keep")
+DUCK_VOLUME = 0.2
 SUBTITLE_FILE = re.compile(r"\A[A-Za-z0-9_.-]+\.ass\Z")
 
 
@@ -25,6 +27,9 @@ class RenderOptions:
     video_height: int
     logo: LogoOptions | None = None
     subtitle_file: str | None = None
+    voice_path: Path | None = None
+    audio_mode: str = "keep"
+    has_original_audio: bool = True
     crf: int = 20
     preset: str = "medium"
 
@@ -88,6 +93,18 @@ def _video_filter(options: RenderOptions) -> str:
     raise ValueError("no video filters configured")
 
 
+def _audio_filter(options: RenderOptions, voice_index: int) -> str:
+    if not options.has_original_audio or options.audio_mode == "mute":
+        return f"[{voice_index}:a]alimiter=limit=0.95[aout]"
+    volume = f"{DUCK_VOLUME:g}" if options.audio_mode == "duck" else "1"
+    return (
+        f"[0:a]volume={volume}[orig];"
+        f"[{voice_index}:a]anull[voice];"
+        "[orig][voice]amix=inputs=2:duration=longest:normalize=0:"
+        "dropout_transition=0,alimiter=limit=0.95[aout]"
+    )
+
+
 def build_ffmpeg_command(
     video_path: Path, output_path: Path, options: RenderOptions
 ) -> list[str]:
@@ -102,24 +119,37 @@ def build_ffmpeg_command(
     output_path = Path(output_path)
     if video_path.resolve() == output_path.resolve():
         raise ValueError("render output must not overwrite original video")
+    if options.audio_mode not in AUDIO_MODES:
+        raise ValueError(f"Unknown audio mode: {options.audio_mode}")
 
     command = ["ffmpeg", "-y", "-nostdin", "-i", str(video_path)]
+    next_input = 1
     if options.logo is not None:
         command += ["-i", str(options.logo.path)]
+        next_input += 1
+    voice_index = next_input
+    if options.voice_path is not None:
+        command += ["-i", str(options.voice_path)]
 
-    if options.logo is not None or options.subtitle_file is not None:
-        command += [
-            "-filter_complex",
-            _video_filter(options),
-            "-map",
-            "[vout]",
-        ]
+    filters: list[str] = []
+    has_video_filter = (
+        options.logo is not None or options.subtitle_file is not None
+    )
+    if has_video_filter:
+        filters.append(_video_filter(options))
+    if options.voice_path is not None:
+        filters.append(_audio_filter(options, voice_index))
+    if filters:
+        command += ["-filter_complex", ";".join(filters)]
+
+    if has_video_filter:
+        command += ["-map", "[vout]"]
     else:
         command += ["-map", "0:v:0"]
+    if options.voice_path is not None:
+        command += ["-map", "[aout]"]
 
     command += [
-        "-map",
-        "0:a?",
         "-c:v",
         "libx264",
         "-crf",
@@ -128,8 +158,12 @@ def build_ffmpeg_command(
         options.preset,
         "-pix_fmt",
         "yuv420p",
-        "-c:a",
-        "copy",
+    ]
+    if options.voice_path is None:
+        command += ["-map", "0:a?", "-c:a", "copy"]
+    else:
+        command += ["-c:a", "aac", "-b:a", "192k"]
+    command += [
         "-movflags",
         "+faststart",
         "-nostats",

@@ -182,3 +182,108 @@ def test_invalid_subtitle_file_names_are_rejected(tmp_path: Path, name: str) -> 
                 subtitle_file=name,
             ),
         )
+
+
+def test_voice_mute_uses_only_the_voice_track(tmp_path: Path) -> None:
+    voice = tmp_path / "voice.mp3"
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            voice_path=voice,
+            audio_mode="mute",
+        ),
+    )
+
+    assert str(voice) in cmd
+    assert _option(cmd, "-filter_complex") == "[1:a]alimiter=limit=0.95[aout]"
+    assert _option(cmd, "-map") == "0:v:0"
+    assert "[aout]" in cmd
+    assert "0:a?" not in cmd
+    assert _option(cmd, "-c:a") == "aac"
+    assert _option(cmd, "-b:a") == "192k"
+
+
+def test_voice_duck_with_logo_and_subtitle_combines_both_filters(tmp_path: Path) -> None:
+    voice = tmp_path / "voice.mp3"
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            logo=LogoOptions(path=tmp_path / "logo.png"),
+            subtitle_file="subtitle.ass",
+            voice_path=voice,
+            audio_mode="duck",
+        ),
+    )
+
+    command_text = " ".join(cmd)
+    assert f"-i {tmp_path / 'logo.png'} -i {voice}" in command_text
+    filters = _option(cmd, "-filter_complex")
+    assert "[0:v][logo]overlay=" in filters
+    assert "[vlogo];[vlogo]ass=subtitle.ass[vout]" in filters
+    assert "[0:a]volume=0.2[orig]" in filters
+    assert "[2:a]anull[voice]" in filters
+    assert (
+        "[orig][voice]amix=inputs=2:duration=longest:normalize=0:"
+        "dropout_transition=0,alimiter=limit=0.95[aout]" in filters
+    )
+    assert _option(cmd, "-map") == "[vout]"
+    assert "[aout]" in cmd
+    assert _option(cmd, "-c:a") == "aac"
+
+
+def test_voice_keep_uses_full_original_volume(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            voice_path=tmp_path / "voice.mp3",
+            audio_mode="keep",
+        ),
+    )
+
+    filters = _option(cmd, "-filter_complex")
+    assert "[0:a]volume=1[orig]" in filters
+    assert "amix=inputs=2:duration=longest:normalize=0" in filters
+    assert _option(cmd, "-map") == "0:v:0"
+    assert _option(cmd, "-c:a") == "aac"
+
+
+def test_voice_works_when_the_source_has_no_audio(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            voice_path=tmp_path / "voice.mp3",
+            audio_mode="duck",
+            has_original_audio=False,
+        ),
+    )
+
+    filters = _option(cmd, "-filter_complex")
+    assert filters == "[1:a]alimiter=limit=0.95[aout]"
+    assert "[0:a]" not in filters
+    assert _option(cmd, "-c:a") == "aac"
+
+
+def test_unknown_audio_mode_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="audio"):
+        build_ffmpeg_command(
+            tmp_path / "in.mp4",
+            tmp_path / "out.mp4",
+            RenderOptions(
+                video_width=100,
+                video_height=100,
+                voice_path=tmp_path / "voice.mp3",
+                audio_mode="loud",
+            ),
+        )

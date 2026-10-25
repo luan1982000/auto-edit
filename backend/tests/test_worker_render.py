@@ -33,36 +33,55 @@ def _make_video(
     *,
     with_logo: bool,
     subtitle: bool = False,
+    voice: bool = False,
+    audio_mode: str = "keep",
+    source_audio: bool = True,
 ) -> tuple[Video, Job]:
     video_id = new_id()
     video_dir = config.videos_dir / video_id
     video_dir.mkdir()
     original = video_dir / "original.mp4"
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=320x240:rate=10",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440",
-            "-t",
-            "1",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:v",
-            "libx264",
-            "-c:a",
-            "aac",
-            str(original),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    source_args = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=320x240:rate=10",
+    ]
+    if source_audio:
+        source_args += ["-f", "lavfi", "-i", "sine=frequency=440"]
+    source_args += [
+        "-t",
+        "1",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:v",
+        "libx264",
+    ]
+    if source_audio:
+        source_args += ["-c:a", "aac"]
+    source_args.append(str(original))
+    subprocess.run(source_args, check=True, capture_output=True)
+
+    if voice:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=24000:cl=mono",
+                "-t",
+                "1",
+                "-c:a",
+                "libmp3lame",
+                str(video_dir / "voice.mp3"),
+            ],
+            check=True,
+            capture_output=True,
+        )
     logo_path = config.assets_dir / "logo.png"
     logo_path.write_bytes(PNG_1PX)
 
@@ -89,6 +108,7 @@ def _make_video(
         dir_path=str(video_dir),
         file_path=str(original),
         status="ready",
+        has_voice=voice,
     )
     job = Job(
         id=new_id(),
@@ -97,8 +117,8 @@ def _make_video(
         params={
             "logo": with_logo,
             "subtitle": subtitle,
-            "voice": False,
-            "keep_original_audio": "keep",
+            "voice": voice,
+            "keep_original_audio": audio_mode,
         },
     )
     with session_factory() as session:
@@ -219,3 +239,77 @@ def test_render_handler_requires_subtitle_data_when_requested(render_env) -> Non
     assert "phụ đề" in (stored_job.error or "")
     assert _reload(session_factory, Video, video.id).has_output is False
     assert not (Path(video.dir_path) / "output_final.tmp.mp4").exists()
+
+
+@pytest.mark.parametrize("audio_mode", ["duck", "keep", "mute"])
+def test_render_handler_mixes_voice_with_logo_and_subtitles(
+    render_env, audio_mode: str
+) -> None:
+    config, session_factory = render_env
+    video, job = _make_video(
+        config,
+        session_factory,
+        with_logo=True,
+        subtitle=True,
+        voice=True,
+        audio_mode=audio_mode,
+    )
+    original = Path(video.file_path)
+    original_bytes = original.read_bytes()
+
+    Worker(
+        session_factory,
+        {"render": build_render_handler(config, session_factory)},
+    ).run_once()
+
+    stored_job = _reload(session_factory, Job, job.id)
+    assert stored_job.status == "done", stored_job.error
+    output = Path(video.dir_path) / "output_final.mp4"
+    assert output.is_file()
+    assert probe_video(output)["has_audio"] is True
+    assert original.read_bytes() == original_bytes
+    assert not (Path(video.dir_path) / "output_final.tmp.mp4").exists()
+
+
+def test_render_handler_mixes_voice_into_silent_source(render_env) -> None:
+    config, session_factory = render_env
+    video, job = _make_video(
+        config,
+        session_factory,
+        with_logo=False,
+        voice=True,
+        audio_mode="duck",
+        source_audio=False,
+    )
+
+    Worker(
+        session_factory,
+        {"render": build_render_handler(config, session_factory)},
+    ).run_once()
+
+    stored_job = _reload(session_factory, Job, job.id)
+    assert stored_job.status == "done", stored_job.error
+    assert probe_video(Path(video.dir_path) / "output_final.mp4")["has_audio"] is True
+
+
+def test_render_handler_requires_voice_file_when_requested(render_env) -> None:
+    config, session_factory = render_env
+    video, job = _make_video(config, session_factory, with_logo=False)
+    with session_factory() as session:
+        stored = session.get(Video, video.id)
+        stored.has_voice = True
+        session.add(stored)
+        job_row = session.get(Job, job.id)
+        job_row.params = {**job_row.params, "voice": True}
+        session.add(job_row)
+        session.commit()
+
+    Worker(
+        session_factory,
+        {"render": build_render_handler(config, session_factory)},
+    ).run_once()
+
+    stored_job = _reload(session_factory, Job, job.id)
+    assert stored_job.status == "failed"
+    assert "giọng" in (stored_job.error or "").lower()
+    assert not (Path(video.dir_path) / "output_final.mp4").exists()

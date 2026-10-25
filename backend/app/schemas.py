@@ -7,6 +7,8 @@ from app.services.urls import validate_url
 
 LogoPosition = Literal["tl", "tr", "bl", "br"]
 SubtitlePosition = Literal["bottom", "top", "center"]
+TTS_VOICE_PATTERN = r"^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]+Neural$"
+TTS_RATE_PATTERN = r"^[+-]\d{1,3}%$"
 
 
 class DownloadRequest(BaseModel):
@@ -89,8 +91,10 @@ class SettingsUpdate(BaseModel):
     logo_opacity: float | None = Field(default=None, ge=0, le=1)
     logo_margin_px: int | None = Field(default=None, ge=0, le=500)
     tts_engine: str | None = None
-    tts_voice: str | None = None
-    tts_rate: str | None = None
+    tts_voice: str | None = Field(
+        default=None, pattern=TTS_VOICE_PATTERN, max_length=64
+    )
+    tts_rate: str | None = Field(default=None, pattern=TTS_RATE_PATTERN, max_length=8)
     subtitle_font: str | None = None
     subtitle_size: int | None = Field(default=None, ge=8, le=200)
     subtitle_position: SubtitlePosition | None = None
@@ -139,6 +143,27 @@ class SubtitleUpdate(BaseModel):
 
 class TranscribeRequest(BaseModel):
     translate: bool = False
+
+
+class TtsRequest(BaseModel):
+    voice: str | None = Field(
+        default=None, pattern=TTS_VOICE_PATTERN, max_length=64
+    )
+    rate: str | None = Field(default=None, pattern=TTS_RATE_PATTERN, max_length=8)
+
+
+class TtsPreviewRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1000)
+    voice: str = Field(pattern=TTS_VOICE_PATTERN, max_length=64)
+    rate: str = Field(pattern=TTS_RATE_PATTERN, max_length=8)
+
+    @field_validator("text")
+    @classmethod
+    def _normalize_text(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("Nội dung nghe thử không được để trống")
+        return normalized
 
 
 class TranslateRequest(BaseModel):

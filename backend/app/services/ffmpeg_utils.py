@@ -102,7 +102,7 @@ def run_ffmpeg_with_progress(
     on_progress(100)
 
 
-def _run(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
+def run_ffmpeg(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError as exc:
@@ -115,9 +115,9 @@ def _run(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str
     return result
 
 
-def probe_video(path: Path) -> dict[str, float | int]:
-    """Return duration_sec, width and height for the first video stream."""
-    result = _run(
+def probe_video(path: Path) -> dict[str, float | int | bool]:
+    """Return duration, dimensions, and whether the file has audio."""
+    result = run_ffmpeg(
         [
             "ffprobe",
             "-v",
@@ -142,14 +142,43 @@ def probe_video(path: Path) -> dict[str, float | int]:
         "duration_sec": float(duration),
         "width": int(video["width"]),
         "height": int(video["height"]),
+        "has_audio": any(
+            stream.get("codec_type") == "audio" for stream in data.get("streams", [])
+        ),
     }
+
+
+def probe_audio_duration(path: Path) -> float:
+    """Return the duration in seconds of an audio file."""
+    path = Path(path)
+    if not path.is_file():
+        raise FFmpegError(f"audio file not found: {path}")
+    result = run_ffmpeg(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            str(path),
+        ]
+    )
+    try:
+        data = json.loads(result.stdout or "{}")
+        duration = float(data.get("format", {}).get("duration") or 0)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise FFmpegError("ffprobe returned invalid audio metadata") from exc
+    if duration <= 0:
+        raise FFmpegError("ffprobe found no audio duration")
+    return duration
 
 
 def ensure_mp4(source: Path, target: Path) -> Path:
     """Make sure the downloaded file is an .mp4 at `target` (remux only, no re-encode)."""
     if source.suffix.lower() != ".mp4":
         target.parent.mkdir(parents=True, exist_ok=True)
-        _run(
+        run_ffmpeg(
             [
                 "ffmpeg",
                 "-y",
@@ -176,7 +205,7 @@ def ensure_mp4(source: Path, target: Path) -> Path:
 def extract_audio(video_path: Path, out_path: Path, sample_rate: int = 16000) -> Path:
     """Extract the first audio stream as mono PCM WAV for speech recognition."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _run(
+    run_ffmpeg(
         [
             "ffmpeg",
             "-y",
@@ -205,7 +234,7 @@ def make_thumbnail(
 ) -> Path:
     """Grab a single frame as JPEG. The caller owns the destination directory."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _run(
+    run_ffmpeg(
         [
             "ffmpeg",
             "-y",
