@@ -7,6 +7,7 @@ from app.services.urls import validate_url
 
 LogoPosition = Literal["tl", "tr", "bl", "br"]
 SubtitlePosition = Literal["bottom", "top", "center"]
+RenderPreset = Literal["logo", "logo_subtitle", "full"]
 TTS_VOICE_PATTERN = r"^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]+Neural$"
 TTS_RATE_PATTERN = r"^[+-]\d{1,3}%$"
 
@@ -77,6 +78,7 @@ class SettingsRead(BaseModel):
     tts_engine: str
     tts_voice: str
     tts_rate: str
+    render_preset: RenderPreset
     subtitle_font: str
     subtitle_size: int
     subtitle_position: SubtitlePosition
@@ -95,6 +97,7 @@ class SettingsUpdate(BaseModel):
         default=None, pattern=TTS_VOICE_PATTERN, max_length=64
     )
     tts_rate: str | None = Field(default=None, pattern=TTS_RATE_PATTERN, max_length=8)
+    render_preset: RenderPreset | None = None
     subtitle_font: str | None = None
     subtitle_size: int | None = Field(default=None, ge=8, le=200)
     subtitle_position: SubtitlePosition | None = None

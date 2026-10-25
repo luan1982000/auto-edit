@@ -54,6 +54,7 @@ class AppSettings(SQLModel, table=True):
     tts_engine: str = "edge"
     tts_voice: str = "vi-VN-HoaiMyNeural"
     tts_rate: str = "+0%"
+    render_preset: str = "full"  # logo | logo_subtitle | full
 
     subtitle_font: str = ""
     subtitle_size: int = 18

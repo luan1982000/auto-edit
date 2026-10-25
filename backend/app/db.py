@@ -21,6 +21,23 @@ def init_db(db_path: Path) -> None:
     )
     _session_factory = sessionmaker(bind=_engine, class_=Session, expire_on_commit=False)
     SQLModel.metadata.create_all(_engine)
+    _migrate_settings(_engine)
+
+
+def _migrate_settings(engine: Engine) -> None:
+    """Add columns introduced after the first local release.
+
+    `create_all` never alters an existing table, so old `data/app.db` files
+    need an explicit, idempotent ALTER.
+    """
+    with engine.begin() as connection:
+        rows = connection.exec_driver_sql("PRAGMA table_info(settings)").fetchall()
+        columns = {row[1] for row in rows}
+        if columns and "render_preset" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE settings ADD COLUMN render_preset "
+                "VARCHAR NOT NULL DEFAULT 'full'"
+            )
 
 
 def get_session_factory() -> sessionmaker[Session]:

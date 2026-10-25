@@ -216,13 +216,14 @@ export function VideoDetail() {
 
   useEffect(() => {
     if (!video || !settings || optionsTouched) return;
-    setOptions((current) => ({
-      ...current,
+    const preset = settings.render_preset;
+    const wantsVoice = preset === "full" && video.has_voice;
+    setOptions({
       logo: Boolean(settings.logo_path),
-      subtitle: video.has_subtitle,
-      voice: video.has_voice,
-      keep_original_audio: video.has_voice ? "duck" : current.keep_original_audio,
-    }));
+      subtitle: preset !== "logo" && video.has_subtitle,
+      voice: wantsVoice,
+      keep_original_audio: wantsVoice ? "duck" : "keep",
+    });
   }, [video, settings, optionsTouched]);
 
   useEffect(() => {

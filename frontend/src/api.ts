@@ -51,6 +51,7 @@ export interface AppSettings {
   tts_engine: string;
   tts_voice: string;
   tts_rate: string;
+  render_preset: "logo" | "logo_subtitle" | "full";
   subtitle_font: string;
   subtitle_size: number;
   subtitle_position: "bottom" | "top" | "center";

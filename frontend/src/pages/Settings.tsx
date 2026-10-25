@@ -448,6 +448,31 @@ export function SettingsPage() {
         </Field>
       </SettingsSection>
 
+      <SettingsSection
+        title="Preset render"
+        description="Lựa chọn mặc định khi mở trang video"
+      >
+        <Field
+          label="Preset"
+          hint="Logo + phụ đề + giọng đọc sẽ bật sẵn nếu video đã có các thành phần đó."
+        >
+          <select
+            className={inputClass}
+            value={form.render_preset}
+            onChange={(event) =>
+              update(
+                "render_preset",
+                event.target.value as AppSettings["render_preset"],
+              )
+            }
+          >
+            <option value="logo">Logo</option>
+            <option value="logo_subtitle">Logo + phụ đề</option>
+            <option value="full">Full: logo + phụ đề + giọng đọc</option>
+          </select>
+        </Field>
+      </SettingsSection>
+
       <SettingsSection title="Logo" description="Góc, kích thước, độ mờ">
         <div className="rounded-xl border border-line/70 bg-ink/30 p-4 sm:col-span-2">
           <div className="flex flex-wrap items-center justify-between gap-2">

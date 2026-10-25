@@ -165,6 +165,7 @@ def test_settings_defaults_and_update(client: TestClient) -> None:
     assert defaults["tts_voice"] == "vi-VN-HoaiMyNeural"
     assert defaults["whisper_model"] == "small"
     assert defaults["cookies_browser"] == ""
+    assert defaults["render_preset"] == "full"
 
     response = client.put(
         "/api/settings", json={"cookies_browser": "chrome", "target_language": "en"}
@@ -181,6 +182,11 @@ def test_settings_defaults_and_update(client: TestClient) -> None:
 def test_settings_rejects_invalid_values(client: TestClient) -> None:
     assert client.put("/api/settings", json={"logo_position": "middle"}).status_code == 422
     assert client.put("/api/settings", json={"logo_opacity": 1.5}).status_code == 422
+    assert client.put("/api/settings", json={"render_preset": "nope"}).status_code == 422
+
+    response = client.put("/api/settings", json={"render_preset": "logo_subtitle"})
+    assert response.status_code == 200
+    assert response.json()["render_preset"] == "logo_subtitle"
 
 
 def test_health_reports_tool_status(client: TestClient) -> None:

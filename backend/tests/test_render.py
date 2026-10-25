@@ -1,3 +1,4 @@
+from itertools import product
 from pathlib import Path
 
 import pytest
@@ -287,3 +288,41 @@ def test_unknown_audio_mode_is_rejected(tmp_path: Path) -> None:
                 audio_mode="loud",
             ),
         )
+
+
+@pytest.mark.parametrize(
+    ("logo", "subtitle", "voice"), list(product([False, True], repeat=3))
+)
+def test_every_checkbox_combination_builds_one_ffmpeg_command(
+    tmp_path: Path, logo: bool, subtitle: bool, voice: bool
+) -> None:
+    logo_path = tmp_path / "logo.png"
+    voice_path = tmp_path / "voice.mp3"
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            logo=LogoOptions(path=logo_path) if logo else None,
+            subtitle_file="subtitle.ass" if subtitle else None,
+            voice_path=voice_path if voice else None,
+            audio_mode="duck",
+        ),
+    )
+
+    assert cmd[0] == "ffmpeg"
+    assert cmd.count("-filter_complex") == (1 if (logo or subtitle or voice) else 0)
+    assert (str(logo_path) in cmd) is logo
+    assert ("ass=subtitle.ass" in " ".join(cmd)) is subtitle
+    assert (str(voice_path) in cmd) is voice
+    assert _option(cmd, "-map") == ("[vout]" if (logo or subtitle) else "0:v:0")
+    assert ("[aout]" in cmd) is voice
+    if voice:
+        assert _option(cmd, "-c:a") == "aac"
+        assert "0:a?" not in cmd
+    else:
+        assert _option(cmd, "-c:a") == "copy"
+        assert "0:a?" in cmd
+    assert _option(cmd, "-progress") == "pipe:1"
+    assert cmd[-1] == str(tmp_path / "out.mp4")
