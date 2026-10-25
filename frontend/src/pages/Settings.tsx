@@ -1,7 +1,17 @@
 import { useEffect, useState, type ReactNode } from "react";
 
-import { api, type AppSettings } from "../api";
-import { AlertIcon, CheckIcon, SpinnerIcon } from "../components/Icons";
+import {
+  api,
+  type AppSettings,
+  type Health,
+  type UpdateYtdlpResponse,
+} from "../api";
+import {
+  AlertIcon,
+  CheckIcon,
+  RefreshIcon,
+  SpinnerIcon,
+} from "../components/Icons";
 
 const inputClass =
   "w-full rounded-xl border border-line bg-ink/60 px-3 py-2 text-[13px] text-zinc-100 outline-none transition focus:border-acid/50 focus:ring-2 focus:ring-acid/10";
@@ -76,6 +86,11 @@ export function SettingsPage() {
     "idle",
   );
   const [error, setError] = useState("");
+  const [health, setHealth] = useState<Health | null>(null);
+  const [updating, setUpdating] = useState(false);
+  const [updateResult, setUpdateResult] =
+    useState<UpdateYtdlpResponse | null>(null);
+  const [updateError, setUpdateError] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -93,6 +108,21 @@ export function SettingsPage() {
             reason instanceof Error ? reason.message : "Không tải được cài đặt",
           );
         }
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .health()
+      .then((value) => {
+        if (alive) setHealth(value);
+      })
+      .catch(() => {
+        // The update button surfaces its own errors.
       });
     return () => {
       alive = false;
@@ -120,6 +150,21 @@ export function SettingsPage() {
         reason instanceof Error ? reason.message : "Lưu cài đặt thất bại",
       );
       setStatus("error");
+    }
+  }
+
+  async function updateYtdlp() {
+    setUpdating(true);
+    setUpdateError("");
+    setUpdateResult(null);
+    try {
+      setUpdateResult(await api.updateYtdlp());
+    } catch (reason) {
+      setUpdateError(
+        reason instanceof Error ? reason.message : "Cập nhật yt-dlp thất bại",
+      );
+    } finally {
+      setUpdating(false);
     }
   }
 
@@ -197,6 +242,69 @@ export function SettingsPage() {
             ))}
           </select>
         </Field>
+
+        <div className="rounded-xl border border-line/70 bg-ink/30 p-4 sm:col-span-2">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[12.5px] font-medium text-zinc-300">yt-dlp</p>
+              <p className="mt-0.5 text-[11.5px] text-zinc-600">
+                {health?.yt_dlp_version
+                  ? `Phiên bản ${health.yt_dlp_version}`
+                  : "Chưa đọc được phiên bản"}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void updateYtdlp()}
+              disabled={updating}
+              className="inline-flex items-center gap-2 rounded-xl border border-line bg-panel px-3.5 py-2 text-[12px] font-medium text-zinc-200 transition hover:border-acid/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {updating ? (
+                <SpinnerIcon className="size-3.5 animate-spin text-acid" />
+              ) : (
+                <RefreshIcon className="size-3.5" />
+              )}
+              {updating ? "Đang cập nhật..." : "Cập nhật yt-dlp"}
+            </button>
+          </div>
+
+          {updateResult && (
+            <div
+              className={`mt-3 rounded-lg border px-3 py-2 text-[11.5px] leading-relaxed ${
+                updateResult.ok
+                  ? "border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-200"
+                  : "border-rose-500/20 bg-rose-500/[0.06] text-rose-200"
+              }`}
+            >
+              <p className="inline-flex items-center gap-1.5 font-medium">
+                {updateResult.ok ? (
+                  <CheckIcon className="size-3.5" />
+                ) : (
+                  <AlertIcon className="size-3.5" />
+                )}
+                {updateResult.ok
+                  ? `Đã cài yt-dlp${updateResult.version ? ` ${updateResult.version}` : ""}`
+                  : "Cập nhật thất bại"}
+              </p>
+              {updateResult.ok && updateResult.restart_required && (
+                <p className="mt-1 text-emerald-200/70">
+                  Khởi động lại backend để dùng bản mới.
+                </p>
+              )}
+              {updateResult.output && (
+                <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-md bg-ink/40 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-400">
+                  {updateResult.output}
+                </pre>
+              )}
+            </div>
+          )}
+
+          {updateError && (
+            <p className="mt-3 rounded-lg border border-rose-500/20 bg-rose-500/[0.06] px-3 py-2 text-[11.5px] text-rose-200">
+              {updateError}
+            </p>
+          )}
+        </div>
       </SettingsSection>
 
       <SettingsSection
@@ -342,9 +450,9 @@ export function SettingsPage() {
       </SettingsSection>
 
       <div className="rounded-2xl border border-line/70 bg-surface/40 p-5 text-[12px] leading-relaxed text-zinc-500">
-        <span className="font-medium text-zinc-300">Ghi chú:</span> Phase 1 chỉ
-        dùng phần tải xuống. Các cấu hình phụ đề, giọng đọc và logo đã được lưu
-        sẵn và sẽ có hiệu lực khi các phase tương ứng được bật.
+        <span className="font-medium text-zinc-300">Ghi chú:</span> Phase 2 dùng
+        phần tải xuống, cookies và cập nhật yt-dlp. Cấu hình phụ đề, giọng đọc
+        và logo đã được lưu sẵn cho các phase sau.
       </div>
     </div>
   );

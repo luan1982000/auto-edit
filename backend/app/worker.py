@@ -14,8 +14,11 @@ from sqlmodel import Session, select
 
 from app.config import AppConfig
 from app.models import Job, Video, utcnow
-from app.services.downloader import DownloadError, download_video
+from app.services.douyin import normalize_douyin_url, with_douyin_hint
+from app.services.downloader import DownloadError, DownloadResult, download_video
+from app.services.fallback import FallbackError, download_via_fallback
 from app.services.ffmpeg_utils import FFmpegError, make_thumbnail, probe_video
+from app.services.urls import detect_platform
 from app.settings_store import get_or_create_settings
 
 logger = logging.getLogger(__name__)
@@ -176,21 +179,66 @@ def build_download_handler(config: AppConfig, session_factory: SessionFactory) -
         if not url:
             raise DownloadError("Job download thiếu URL")
 
+        source_input = url
         with session_factory() as session:
             video = session.get(Video, ctx.video_id)
             if video is None:
                 raise DownloadError("Video không tồn tại trong database")
             cookies_browser = get_or_create_settings(session).cookies_browser
+            platform = (
+                video.platform
+                if video.platform != "other"
+                else detect_platform(url)
+            )
+            effective_url = (
+                normalize_douyin_url(url) if platform == "douyin" else url
+            )
+            if effective_url != video.source_url:
+                video.source_url = effective_url
+                session.add(video)
+                session.commit()
 
         video_dir = config.videos_dir / ctx.video_id
         ctx.update(0, "Bắt đầu tải...")
-        result = download_video(
-            url=url,
-            video_dir=video_dir,
-            progress_cb=ctx.update,
-            cookies_browser=cookies_browser,
-            deadline_check=ctx.check_deadline,
-        )
+        used_fallback = False
+        try:
+            result = download_video(
+                url=effective_url,
+                video_dir=video_dir,
+                progress_cb=ctx.update,
+                cookies_browser=cookies_browser,
+                deadline_check=ctx.check_deadline,
+            )
+        except DownloadError as exc:
+            if platform != "douyin":
+                raise
+            if not config.douyin_fallback_url:
+                raise DownloadError(
+                    with_douyin_hint(str(exc), fallback_enabled=False)
+                ) from exc
+
+            ctx.update(0, "yt-dlp lỗi — thử downloader fallback...")
+            try:
+                fallback_file = download_via_fallback(
+                    base_url=config.douyin_fallback_url,
+                    video_url=effective_url,
+                    target_path=video_dir / "original.mp4",
+                    deadline_check=ctx.check_deadline,
+                )
+            except FallbackError as fallback_exc:
+                raise DownloadError(
+                    with_douyin_hint(
+                        f"{exc}\n\nFallback cũng thất bại: {fallback_exc}",
+                        fallback_enabled=True,
+                    )
+                ) from fallback_exc
+
+            result = DownloadResult(
+                file_path=fallback_file,
+                title="Douyin video",
+                platform="douyin",
+            )
+            used_fallback = True
 
         try:
             probed = probe_video(result.file_path)
@@ -209,12 +257,14 @@ def build_download_handler(config: AppConfig, session_factory: SessionFactory) -
             has_thumb = False
 
         meta = {
-            "url": url,
+            "url": effective_url,
+            "source_input": source_input,
             "title": result.title,
             "duration_sec": duration,
             "width": int(probed["width"]),
             "height": int(probed["height"]),
             "platform": result.platform,
+            "fallback": used_fallback,
             "downloaded_at": utcnow().isoformat(),
         }
         (video_dir / "meta.json").write_text(
@@ -225,6 +275,7 @@ def build_download_handler(config: AppConfig, session_factory: SessionFactory) -
             video = session.get(Video, ctx.video_id)
             if video is None:
                 raise DownloadError("Video bị xoá trong lúc tải")
+            video.source_url = effective_url
             video.title = result.title or video.title or ctx.video_id
             video.duration_sec = duration
             video.width = int(probed["width"])

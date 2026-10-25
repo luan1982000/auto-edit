@@ -6,6 +6,8 @@ from sqlmodel import select
 
 from app.ids import new_id
 from app.models import Job
+from app.routers import system
+from app.services.updater import UpdateResult
 
 URL_A = "https://www.youtube.com/shorts/aaaaaaaaaaa"
 URL_B = "https://www.facebook.com/reel/1234567890"
@@ -186,3 +188,27 @@ def test_health_reports_tool_status(client: TestClient) -> None:
     assert payload["ok"] is True
     assert payload["ffmpeg"] is True
     assert payload["yt_dlp"] is True
+
+
+def test_update_ytdlp_endpoint_returns_result(
+    client: TestClient, monkeypatch
+) -> None:
+    fake = UpdateResult(
+        ok=True,
+        output="Successfully installed yt-dlp",
+        version="2026.10.1",
+        restart_required=True,
+    )
+    monkeypatch.setattr(system, "run_update", lambda: fake)
+
+    response = client.post("/api/system/update-ytdlp")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "output": "Successfully installed yt-dlp",
+        "version": "2026.10.1",
+        "restart_required": True,
+    }
+    # The GET hits the SPA/API fallback, so 404 is expected; 405 is also acceptable.
+    assert client.get("/api/system/update-ytdlp").status_code in (404, 405)

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import yt_dlp
 
@@ -161,15 +162,40 @@ class _CollectingLogger:
         return self.errors[-1] if self.errors else ""
 
 
-def download_video(
+T = TypeVar("T")
+
+
+def retry_call(
+    func: Callable[[], T],
+    *,
+    retries: int = 2,
+    backoff_sec: float = 1.0,
+    sleep: Callable[[float], None] = time.sleep,
+    on_retry: Callable[[int, DownloadError], None] | None = None,
+) -> T:
+    """Run `func`, retrying only DownloadError with exponential backoff."""
+    attempts = max(0, int(retries)) + 1
+    for attempt in range(attempts):
+        try:
+            return func()
+        except DownloadError as exc:
+            if attempt + 1 >= attempts:
+                raise
+            if on_retry is not None:
+                on_retry(attempt + 1, exc)
+            sleep(backoff_sec * (2**attempt))
+    raise AssertionError("unreachable")
+
+
+def _download_once(
     url: str,
     video_dir: Path,
-    progress_cb: ProgressCallback | None = None,
-    cookies_browser: str = "",
-    deadline_check: DeadlineCheck | None = None,
+    progress_cb: ProgressCallback | None,
+    cookies_browser: str,
+    deadline_check: DeadlineCheck | None,
 ) -> DownloadResult:
-    """Download `url` and return metadata. Raises DownloadError on failure."""
-    video_dir.mkdir(parents=True, exist_ok=True)
+    if deadline_check is not None:
+        deadline_check()
     collector = _CollectingLogger()
 
     def hook(data: dict[str, Any]) -> None:
@@ -203,3 +229,44 @@ def download_video(
     result = result_from_info(info, video_dir)
     result.file_path = ensure_mp4(result.file_path, video_dir / "original.mp4")
     return result
+
+
+def download_video(
+    url: str,
+    video_dir: Path,
+    progress_cb: ProgressCallback | None = None,
+    cookies_browser: str = "",
+    deadline_check: DeadlineCheck | None = None,
+    retries: int = 2,
+    retry_backoff_sec: float = 1.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> DownloadResult:
+    """Download `url` and return metadata. Raises DownloadError after retries."""
+    video_dir.mkdir(parents=True, exist_ok=True)
+    last_progress = 0
+
+    def tracked_progress(percent: int, message: str) -> None:
+        nonlocal last_progress
+        last_progress = percent
+        if progress_cb is not None:
+            progress_cb(percent, message)
+
+    def on_retry(attempt: int, exc: DownloadError) -> None:
+        if deadline_check is not None:
+            deadline_check()
+        if progress_cb is not None:
+            first_line = str(exc).splitlines()[0][:140] if str(exc) else "lỗi"
+            progress_cb(
+                last_progress,
+                f"Lỗi: {first_line} — thử lại {attempt}/{max(0, int(retries))}...",
+            )
+
+    return retry_call(
+        lambda: _download_once(
+            url, video_dir, tracked_progress, cookies_browser, deadline_check
+        ),
+        retries=retries,
+        backoff_sec=retry_backoff_sec,
+        sleep=sleep,
+        on_retry=on_retry,
+    )

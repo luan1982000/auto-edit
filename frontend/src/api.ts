@@ -68,6 +68,13 @@ export interface Health {
   problems: string[];
 }
 
+export interface UpdateYtdlpResponse {
+  ok: boolean;
+  output: string;
+  version: string | null;
+  restart_required: boolean;
+}
+
 async function readError(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json();
@@ -130,6 +137,10 @@ export const api = {
     request<AppSettings>("/api/settings", {
       method: "PUT",
       body: JSON.stringify(patch),
+    }),
+  updateYtdlp: () =>
+    request<UpdateYtdlpResponse>("/api/system/update-ytdlp", {
+      method: "POST",
     }),
 
   thumbUrl: (id: string) => `/api/videos/${id}/thumb`,

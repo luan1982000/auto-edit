@@ -6,6 +6,8 @@ import shutil
 import yt_dlp
 from fastapi import APIRouter
 
+from app.services.updater import run_update
+
 router = APIRouter(prefix="/api", tags=["system"])
 
 
@@ -31,3 +33,15 @@ def health() -> dict[str, object]:
     if not status["yt_dlp"]:
         problems.append("Thiếu yt-dlp — không tải được video")
     return {"ok": True, **status, "problems": problems}
+
+
+@router.post("/system/update-ytdlp")
+def update_ytdlp() -> dict[str, object]:
+    """Run `python -m pip install --upgrade yt-dlp` in this environment."""
+    result = run_update()
+    return {
+        "ok": result.ok,
+        "output": result.output,
+        "version": result.version,
+        "restart_required": result.restart_required,
+    }

@@ -16,7 +16,9 @@ class AppConfig(BaseSettings):
     )
 
     data_dir: Path = ROOT_DIR / "data"
-    anthropic_api_key: str = ""
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
     douyin_fallback_url: str = ""
 
     job_timeout_sec: int = 900
