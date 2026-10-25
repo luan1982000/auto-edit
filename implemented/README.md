@@ -92,11 +92,9 @@ data/
 | `d32f8d1` | Phase 4 — subtitle transcription, DeepSeek translation and ASS burn-in |
 | `41955d1` | Phase 5 — Edge TTS voice-over, timeline mixing and ducked render |
 | `c0805cf` | Phase 6 — render presets, settings migration and combo coverage |
+| `58be7e5` | Phase 7–8 — che phụ đề cũ, chọn ngôn ngữ, upload video từ máy |
 
-Tài liệu trong thư mục `implemented/` được commit cùng bản hoàn thiện Phase 6.
-
-Phase 7 (che phụ đề cũ + chọn ngôn ngữ) và Phase 8 (upload video từ máy) hiện nằm trong working
-tree, **chưa commit** tại thời điểm viết tài liệu; base là `1e9e2e9`.
+Tài liệu trong thư mục `implemented/` được cập nhật cùng Phase 7–8.
 
 ## Kiểm chứng mới nhất
 

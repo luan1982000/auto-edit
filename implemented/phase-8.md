@@ -1,6 +1,6 @@
 # Phase 8 — Upload video từ máy (bổ sung)
 
-- **Commit code:** chưa commit tại thời điểm viết tài liệu (base `1e9e2e9`)
+- **Commit code:** `58be7e5`
 - **Trạng thái:** ✅ hoàn tất, đã kiểm chứng
 - **Tài liệu phase trước:** [phase-7.md](phase-7.md)
 

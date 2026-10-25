@@ -1,6 +1,6 @@
 # Phase 7 — Che phụ đề cũ + chọn ngôn ngữ (bổ sung)
 
-- **Commit code:** chưa commit tại thời điểm viết tài liệu (base `1e9e2e9`)
+- **Commit code:** `58be7e5`
 - **Trạng thái:** ✅ hoàn tất, đã kiểm chứng
 - **Tài liệu phase trước:** [phase-6.md](phase-6.md)
 
