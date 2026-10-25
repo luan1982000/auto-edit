@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.services.cover import CoverRegion
+
 LOGO_POSITIONS = ("tl", "tr", "bl", "br")
 AUDIO_MODES = ("mute", "duck", "keep")
 DUCK_VOLUME = 0.2
@@ -28,6 +30,7 @@ class RenderOptions:
     logo: LogoOptions | None = None
     subtitle_file: str | None = None
     voice_path: Path | None = None
+    cover_region: CoverRegion | None = None
     audio_mode: str = "keep"
     has_original_audio: bool = True
     crf: int = 20
@@ -54,7 +57,14 @@ def _overlay_xy(logo: LogoOptions) -> str:
     return f"{x}:{y}"
 
 
-def _logo_filter(video_width: int, video_height: int, logo: LogoOptions) -> str:
+def _logo_filter(
+    video_width: int,
+    video_height: int,
+    logo: LogoOptions,
+    *,
+    input_label: str = "0:v",
+    output_label: str = "vout",
+) -> str:
     if video_height <= 0:
         raise ValueError("video height must be known before overlaying a logo")
     if not 0 <= logo.opacity <= 1:
@@ -64,7 +74,7 @@ def _logo_filter(video_width: int, video_height: int, logo: LogoOptions) -> str:
     position = _overlay_xy(logo)
     return (
         f"[1:v]scale={width}:-2,format=rgba,colorchannelmixer=aa={opacity}[logo];"
-        f"[0:v][logo]overlay={position}"
+        f"[{input_label}][logo]overlay={position}[{output_label}]"
     )
 
 
@@ -76,21 +86,56 @@ def _subtitle_filter(name: str | None) -> str | None:
     return f"ass={name}"
 
 
-def _video_filter(options: RenderOptions) -> str:
-    logo_filter = (
-        _logo_filter(options.video_width, options.video_height, options.logo)
-        if options.logo is not None
-        else None
+def _cover_filter(
+    region: CoverRegion,
+    video_width: int,
+    video_height: int,
+    *,
+    output_label: str,
+) -> str:
+    x, y, width, height = region.pixel_box(video_width, video_height)
+    return (
+        f"[0:v]drawbox=x={x}:y={y}:w={width}:h={height}"
+        f":color=black@1.0:t=fill[{output_label}]"
     )
+
+
+def _video_filter(options: RenderOptions) -> str:
+    has_cover = options.cover_region is not None
+    has_logo = options.logo is not None
     subtitle_filter = _subtitle_filter(options.subtitle_file)
 
-    if logo_filter and subtitle_filter:
-        return f"{logo_filter}[vlogo];[vlogo]{subtitle_filter}[vout]"
-    if logo_filter:
-        return f"{logo_filter}[vout]"
-    if subtitle_filter:
-        return f"[0:v]{subtitle_filter}[vout]"
-    raise ValueError("no video filters configured")
+    if not has_cover and not has_logo and subtitle_filter is None:
+        raise ValueError("no video filters configured")
+
+    parts: list[str] = []
+    current = "0:v"
+    if options.cover_region is not None:
+        output = "vcover" if (has_logo or subtitle_filter is not None) else "vout"
+        parts.append(
+            _cover_filter(
+                options.cover_region,
+                options.video_width,
+                options.video_height,
+                output_label=output,
+            )
+        )
+        current = output
+    if options.logo is not None:
+        output = "vlogo" if subtitle_filter is not None else "vout"
+        parts.append(
+            _logo_filter(
+                options.video_width,
+                options.video_height,
+                options.logo,
+                input_label=current,
+                output_label=output,
+            )
+        )
+        current = output
+    if subtitle_filter is not None:
+        parts.append(f"[{current}]{subtitle_filter}[vout]")
+    return ";".join(parts)
 
 
 def _audio_filter(options: RenderOptions, voice_index: int) -> str:
@@ -133,7 +178,9 @@ def build_ffmpeg_command(
 
     filters: list[str] = []
     has_video_filter = (
-        options.logo is not None or options.subtitle_file is not None
+        options.logo is not None
+        or options.subtitle_file is not None
+        or options.cover_region is not None
     )
     if has_video_filter:
         filters.append(_video_filter(options))

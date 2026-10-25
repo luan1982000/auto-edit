@@ -51,11 +51,69 @@ def test_transcribe_creates_a_job_with_snapshotted_settings(
     assert body["params"] == {
         "translate": True,
         "model": "medium",
+        "source_language": None,
         "target_language": "en",
     }
 
     jobs = client.get("/api/jobs", params={"video_id": video.id}).json()
     assert [job["id"] for job in jobs] == [body["id"]]
+
+
+def test_transcribe_snapshots_selected_languages(
+    client: TestClient, create_video
+) -> None:
+    video = create_video()
+    _write_source(client, video)
+
+    response = client.post(
+        f"/api/videos/{video.id}/transcribe",
+        json={
+            "translate": True,
+            "source_language": " ZH ",
+            "target_language": "ja",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["params"] == {
+        "translate": True,
+        "model": "small",
+        "source_language": "zh",
+        "target_language": "ja",
+    }
+
+
+def test_transcribe_auto_source_language_is_stored_as_none(
+    client: TestClient, create_video
+) -> None:
+    video = create_video()
+    _write_source(client, video)
+
+    response = client.post(
+        f"/api/videos/{video.id}/transcribe",
+        json={"source_language": "auto"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["params"]["source_language"] is None
+
+
+def test_transcribe_rejects_unsupported_languages(
+    client: TestClient, create_video
+) -> None:
+    video = create_video()
+    _write_source(client, video)
+
+    for payload in (
+        {"source_language": "xx"},
+        {"source_language": "../vi"},
+        {"translate": True, "target_language": "xx"},
+        {"translate": True, "target_language": "auto"},
+    ):
+        response = client.post(
+            f"/api/videos/{video.id}/transcribe", json=payload
+        )
+        assert response.status_code == 422, payload
 
 
 def test_transcribe_rejects_unready_or_missing_source(
@@ -99,6 +157,33 @@ def test_translate_requires_an_existing_subtitle(
     )
     assert response.status_code == 202
     assert response.json()["params"] == {"target_language": "en"}
+
+
+def test_translate_normalizes_the_target_language(
+    client: TestClient, create_video
+) -> None:
+    video = create_video()
+    _write_subtitle(client, video)
+
+    response = client.post(
+        f"/api/videos/{video.id}/translate", json={"target_language": " EN "}
+    )
+
+    assert response.status_code == 202
+    assert response.json()["params"] == {"target_language": "en"}
+
+
+def test_translate_rejects_unsupported_language(
+    client: TestClient, create_video
+) -> None:
+    video = create_video()
+    _write_subtitle(client, video)
+
+    response = client.post(
+        f"/api/videos/{video.id}/translate", json={"target_language": "xx"}
+    )
+
+    assert response.status_code == 422
 
 
 def test_get_subtitle_returns_saved_data(client: TestClient, create_video) -> None:

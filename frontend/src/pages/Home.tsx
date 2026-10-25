@@ -6,11 +6,24 @@ import { JobCard } from "../components/JobCard";
 import { VideoCard } from "../components/VideoCard";
 import {
   AlertIcon,
+  CheckIcon,
   DownloadIcon,
+  FilmIcon,
   FolderIcon,
   RefreshIcon,
   SpinnerIcon,
+  UploadIcon,
+  XIcon,
 } from "../components/Icons";
+
+const MAX_UPLOAD_BYTES = 2 * 1024 ** 3;
+
+function formatFileSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
 
 export function Home() {
   const [text, setText] = useState("");
@@ -22,6 +35,12 @@ export function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [dismissedJobs, setDismissedJobs] = useState<Set<string>>(new Set());
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [uploadNotice, setUploadNotice] = useState("");
+  const [dragActive, setDragActive] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const urls = useMemo(
     () =>
@@ -116,6 +135,39 @@ export function Home() {
     window.setTimeout(() => setRefreshing(false), 250);
   }
 
+  function chooseUploadFile(file: File | undefined) {
+    if (!file || uploading) return;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setUploadFile(null);
+      setUploadNotice("");
+      setUploadError("Video quá lớn — tối đa 2 GB");
+      return;
+    }
+    setUploadFile(file);
+    setUploadError("");
+    setUploadNotice("");
+  }
+
+  async function uploadSelectedVideo() {
+    if (!uploadFile || uploading) return;
+    setUploading(true);
+    setUploadError("");
+    setUploadNotice("");
+    try {
+      const video = await api.uploadVideo(uploadFile);
+      setUploadFile(null);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+      setUploadNotice(`Đã thêm “${video.title}” vào thư viện.`);
+      await refreshVideos();
+    } catch (error) {
+      setUploadError(
+        error instanceof Error ? error.message : "Không tải được video lên",
+      );
+    } finally {
+      setUploading(false);
+    }
+  }
+
   function dismissJob(jobId: string) {
     setDismissedJobs((previous) => new Set(previous).add(jobId));
   }
@@ -147,7 +199,7 @@ export function Home() {
               <span className="text-zinc-200">
                 Facebook Reel, Douyin, TikTok, YouTube Shorts
               </span>{" "}
-              — mỗi dòng một link. Video lưu trong{" "}
+              — mỗi dòng một link — hoặc tải video có sẵn từ máy. Video lưu trong{" "}
               <code className="rounded bg-white/5 px-1.5 py-0.5 text-[11px] text-zinc-300">
                 data/videos/
               </code>{" "}
@@ -202,6 +254,120 @@ export function Home() {
                 {formError}
               </p>
             )}
+
+            <div className="mt-4 border-t border-line/70 pt-4">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <span className="text-[11px] font-medium uppercase tracking-[0.16em] text-zinc-500">
+                  Hoặc tải video từ máy
+                </span>
+                <span className="text-[10px] text-zinc-600">Tối đa 2 GB</span>
+              </div>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                accept="video/*,.mkv,.m4v,.mov,.avi,.mpeg,.mpg,.wmv,.flv"
+                aria-label="Chọn video từ máy"
+                className="sr-only"
+                onChange={(event) => {
+                  chooseUploadFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+              <div
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  if (!uploading) setDragActive(true);
+                }}
+                onDragLeave={() => setDragActive(false)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setDragActive(false);
+                  chooseUploadFile(event.dataTransfer.files?.[0]);
+                }}
+                className={`rounded-xl border border-dashed px-3 py-3 transition ${
+                  dragActive
+                    ? "border-acid/60 bg-acid/[0.06]"
+                    : "border-line bg-surface/40"
+                }`}
+              >
+                {uploadFile ? (
+                  <div className="flex items-center gap-2.5">
+                    <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-white/5 text-zinc-400">
+                      <FilmIcon className="size-4" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[12px] font-medium text-zinc-200">
+                        {uploadFile.name}
+                      </p>
+                      <p className="mt-0.5 text-[10.5px] tabular-nums text-zinc-500">
+                        {formatFileSize(uploadFile.size)}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={uploading}
+                      onClick={() => uploadInputRef.current?.click()}
+                      className="rounded-lg border border-line px-2.5 py-1 text-[11px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200 disabled:opacity-40"
+                    >
+                      Đổi
+                    </button>
+                    <button
+                      type="button"
+                      disabled={uploading}
+                      onClick={() => {
+                        setUploadFile(null);
+                        setUploadError("");
+                        setUploadNotice("");
+                      }}
+                      aria-label="Bỏ chọn video"
+                      className="grid size-7 shrink-0 place-items-center rounded-lg text-zinc-500 transition hover:bg-white/5 hover:text-zinc-200 disabled:opacity-40"
+                    >
+                      <XIcon className="size-3.5" />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={uploading}
+                    onClick={() => uploadInputRef.current?.click()}
+                    className="flex w-full items-center justify-center gap-2 py-1 text-[12px] text-zinc-500 transition hover:text-zinc-300 disabled:opacity-40"
+                  >
+                    <UploadIcon className="size-4 text-zinc-600" />
+                    Chọn video hoặc kéo thả vào đây
+                  </button>
+                )}
+              </div>
+
+              {uploadFile && (
+                <button
+                  type="button"
+                  onClick={() => void uploadSelectedVideo()}
+                  disabled={uploading}
+                  className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-acid/30 bg-acid/10 px-3 py-2 text-[12.5px] font-semibold text-acid transition hover:bg-acid/15 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {uploading ? (
+                    <SpinnerIcon className="size-4 animate-spin" />
+                  ) : (
+                    <UploadIcon className="size-4" />
+                  )}
+                  {uploading
+                    ? "Đang tải lên và xử lý..."
+                    : "Thêm vào thư viện"}
+                </button>
+              )}
+
+              {uploadError && (
+                <p className="mt-2 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[11.5px] text-rose-300">
+                  {uploadError}
+                </p>
+              )}
+              {uploadNotice && (
+                <p className="mt-2 flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-[11.5px] text-emerald-300">
+                  <CheckIcon className="mt-0.5 size-3.5 shrink-0" />
+                  <span className="min-w-0 break-words">{uploadNotice}</span>
+                </p>
+              )}
+            </div>
           </form>
         </div>
       </section>
@@ -300,7 +466,7 @@ export function Home() {
               Thư viện
             </p>
             <h2 className="mt-1 text-xl font-semibold tracking-tight text-white">
-              Video đã tải{" "}
+              Video trong thư viện{" "}
               <span className="ml-1 text-sm font-normal text-zinc-500">
                 ({videos.length})
               </span>
@@ -337,8 +503,8 @@ export function Home() {
                 Thư viện đang trống
               </p>
               <p className="mt-1 max-w-xs text-[12.5px] leading-relaxed text-zinc-500">
-                Dán link ở khung phía trên và bấm “Tải video”. Video đầu tiên sẽ
-                xuất hiện ở đây kèm thumbnail.
+                Dán link hoặc chọn video từ máy ở khung phía trên. Video đầu
+                tiên sẽ xuất hiện ở đây kèm thumbnail.
               </p>
             </div>
           ) : (

@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -117,6 +118,26 @@ def test_stream_original_supports_range_requests(client: TestClient, create_vide
     assert response.headers["content-range"] == "bytes 2-5/10"
 
 
+def test_video_reports_an_output_version_that_changes_after_each_render(
+    client: TestClient, create_video
+) -> None:
+    video = create_video()
+    url = f"/api/videos/{video.id}"
+    assert client.get(url).json()["output_version"] == 0
+
+    output = Path(video.dir_path) / "output_final.mp4"
+    output.write_bytes(b"first")
+    os.utime(output, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    first = client.get(url).json()["output_version"]
+    assert first == 1_700_000_000_000_000_000
+
+    output.write_bytes(b"second")
+    os.utime(output, ns=(1_700_000_100_000_000_000, 1_700_000_100_000_000_000))
+    second = client.get(url).json()["output_version"]
+    assert second == 1_700_000_100_000_000_000
+    assert second != first
+
+
 def test_stream_output_returns_404_when_missing(client: TestClient, create_video) -> None:
     video = create_video()
     response = client.get(f"/api/videos/{video.id}/file?variant=output")
@@ -183,10 +204,19 @@ def test_settings_rejects_invalid_values(client: TestClient) -> None:
     assert client.put("/api/settings", json={"logo_position": "middle"}).status_code == 422
     assert client.put("/api/settings", json={"logo_opacity": 1.5}).status_code == 422
     assert client.put("/api/settings", json={"render_preset": "nope"}).status_code == 422
+    assert client.put("/api/settings", json={"target_language": "xx"}).status_code == 422
+    assert client.put("/api/settings", json={"target_language": "  "}).status_code == 422
 
     response = client.put("/api/settings", json={"render_preset": "logo_subtitle"})
     assert response.status_code == 200
     assert response.json()["render_preset"] == "logo_subtitle"
+
+
+def test_settings_normalizes_the_target_language(client: TestClient) -> None:
+    response = client.put("/api/settings", json={"target_language": " ZH-HANT "})
+
+    assert response.status_code == 200
+    assert response.json()["target_language"] == "zh-Hant"
 
 
 def test_health_reports_tool_status(client: TestClient) -> None:

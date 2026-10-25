@@ -255,3 +255,55 @@ def make_thumbnail(
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise FFmpegError("ffmpeg produced an empty thumbnail")
     return out_path
+
+
+def extract_sample_frames(
+    video_path: Path,
+    out_dir: Path,
+    *,
+    duration_sec: float,
+    fractions: tuple[float, ...] = (0.15, 0.5, 0.85),
+    width: int = 720,
+) -> list[tuple[float, Path]]:
+    """Capture evenly spaced JPEG frames used to locate burned-in subtitles.
+
+    Frames are named `sample-1.jpg`, `sample-2.jpg`, ... and stale samples from
+    a previous request are removed first. Returns `(seconds, path)` pairs.
+    """
+    if duration_sec <= 0:
+        raise FFmpegError("video duration must be positive to sample frames")
+    if not fractions:
+        raise FFmpegError("at least one frame position is required")
+    video_path = Path(video_path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in out_dir.glob("sample-*.jpg"):
+        stale.unlink(missing_ok=True)
+
+    frames: list[tuple[float, Path]] = []
+    for index, fraction in enumerate(fractions, start=1):
+        position = min(max(fraction, 0.0), 0.99)
+        at_sec = duration_sec * position
+        out_path = out_dir / f"sample-{index}.jpg"
+        run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{at_sec:.3f}",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={width}:-2",
+                "-q:v",
+                "3",
+                str(out_path),
+            ],
+            timeout=60,
+        )
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            raise FFmpegError("ffmpeg produced an empty sample frame")
+        frames.append((at_sec, out_path))
+    return frames

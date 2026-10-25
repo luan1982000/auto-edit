@@ -17,6 +17,7 @@ from sqlmodel import Session, select
 from app.config import AppConfig
 from app.models import Job, Video, utcnow
 from app.services.assets import resolve_logo
+from app.services.cover import CoverRegionError, load_cover_region
 from app.services.douyin import normalize_douyin_url, with_douyin_hint
 from app.services.downloader import DownloadError, DownloadResult, download_video
 from app.services.fallback import FallbackError, download_via_fallback
@@ -27,6 +28,10 @@ from app.services.ffmpeg_utils import (
     probe_audio_duration,
     probe_video,
     run_ffmpeg_with_progress,
+)
+from app.services.languages import (
+    normalize_source_language,
+    normalize_target_language,
 )
 from app.services.render import (
     AUDIO_MODES,
@@ -107,9 +112,58 @@ class Worker:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        self.recover_orphaned_jobs()
         self._stop.clear()
         self._thread = Thread(target=self._loop, name="job-worker", daemon=True)
         self._thread.start()
+
+    def recover_orphaned_jobs(self) -> int:
+        """Fail jobs left `running` by a previous process and unstick videos.
+
+        A single worker owns the queue, so any `running` row at startup belongs
+        to an interrupted process. Mark it failed instead of letting the API's
+        active-job guard block retries forever, and mirror that failure onto
+        interrupted downloads so the library does not spin on "download".
+        """
+        interrupted = "Job bị gián đoạn do ứng dụng khởi động lại — hãy chạy lại."
+        stuck = "Tải xuống bị gián đoạn — hãy tải lại video."
+        recovered = 0
+        with self._session_factory() as session:
+            running_jobs = session.exec(
+                select(Job).where(Job.status == "running")
+            ).all()
+            for job in running_jobs:
+                job.status = "failed"
+                job.error = interrupted
+                job.message = "Thất bại"
+                job.finished_at = utcnow()
+                session.add(job)
+                if job.video_id and job.type == "download":
+                    video = session.get(Video, job.video_id)
+                    if video is not None:
+                        video.status = "failed"
+                        video.error = interrupted
+                        session.add(video)
+                recovered += 1
+
+            downloading = session.exec(
+                select(Video).where(Video.status == "downloading")
+            ).all()
+            for video in downloading:
+                active = session.exec(
+                    select(Job).where(
+                        Job.video_id == video.id,
+                        Job.type == "download",
+                        Job.status.in_(["pending", "running"]),
+                    )
+                ).first()
+                if active is None:
+                    video.status = "failed"
+                    video.error = video.error or stuck
+                    session.add(video)
+
+            session.commit()
+        return recovered
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
@@ -390,6 +444,17 @@ def build_transcribe_handler(
 
         model = str(ctx.params.get("model") or model)
         target_language = str(ctx.params.get("target_language") or target_language)
+        raw_source = ctx.params.get("source_language")
+        try:
+            source_language = normalize_source_language(
+                raw_source
+                if isinstance(raw_source, str) or raw_source is None
+                else str(raw_source)
+            )
+            if bool(ctx.params.get("translate")):
+                target_language = normalize_target_language(target_language)
+        except ValueError as exc:
+            raise TranscriptionError(str(exc)) from exc
         audio_path = video_dir / "audio.wav"
 
         ctx.update(1, "Tách audio...")
@@ -406,6 +471,7 @@ def build_transcribe_handler(
                 duration_sec=duration,
                 on_progress=ctx.update,
                 deadline_check=ctx.check_deadline,
+                language=source_language,
             )
         finally:
             audio_path.unlink(missing_ok=True)
@@ -466,6 +532,10 @@ def build_translate_handler(
             target_language = str(
                 ctx.params.get("target_language") or settings.target_language
             )
+        try:
+            target_language = normalize_target_language(target_language)
+        except ValueError as exc:
+            raise TranslationError(str(exc)) from exc
 
         data = load_subtitle_data(video_dir / "subtitle.json")
         if data is None:
@@ -638,6 +708,13 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
         if audio_mode not in AUDIO_MODES:
             raise RenderError(f"Chế độ âm thanh không hợp lệ: {audio_mode}")
 
+        cover_region = None
+        if subtitle_enabled:
+            try:
+                cover_region = load_cover_region(video_dir)
+            except CoverRegionError as exc:
+                raise RenderError(str(exc)) from exc
+
         voice_path: Path | None = None
         has_original_audio = True
         if voice_enabled:
@@ -683,6 +760,7 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
                 logo=logo_options,
                 subtitle_file=subtitle_file,
                 voice_path=voice_path,
+                cover_region=cover_region,
                 audio_mode=audio_mode,
                 has_original_audio=has_original_audio,
             ),

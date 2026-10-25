@@ -8,6 +8,7 @@ from app.config import AppConfig
 from app.db import get_session_factory, init_db
 from app.ids import new_id
 from app.models import Job, Video
+from app.services.cover import CoverRegion, save_cover_region
 from app.services.ffmpeg_utils import probe_video
 from app.services.subtitles import SubtitleData, SubtitleSegment, save_subtitle_data
 from app.settings_store import get_or_create_settings
@@ -220,6 +221,90 @@ def test_render_handler_burns_ass_subtitles(render_env) -> None:
     assert "Xin chào" in ass
     assert original.read_bytes() == original_bytes
     assert not (video_dir / "output_final.tmp.mp4").exists()
+
+
+def test_render_handler_covers_old_subtitles_before_burning_new_ones(
+    render_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, session_factory = render_env
+    video, job = _make_video(
+        config, session_factory, with_logo=True, subtitle=True
+    )
+    region = CoverRegion(0.05, 0.75, 0.9, 0.2)
+    save_cover_region(Path(video.dir_path), region)
+    captured: dict = {}
+    from app.services import render as render_module
+
+    real_build = render_module.build_ffmpeg_command
+
+    def spy(source, output, options):
+        captured["options"] = options
+        captured["command"] = real_build(source, output, options)
+        return captured["command"]
+
+    monkeypatch.setattr("app.worker.build_ffmpeg_command", spy)
+
+    Worker(
+        session_factory,
+        {"render": build_render_handler(config, session_factory)},
+    ).run_once()
+
+    stored_job = _reload(session_factory, Job, job.id)
+    assert stored_job.status == "done", stored_job.error
+    assert captured["options"].cover_region == region
+    assert "drawbox=" in " ".join(captured["command"])
+    output = Path(video.dir_path) / "output_final.mp4"
+    assert output.is_file()
+
+
+def test_render_handler_ignores_saved_region_without_subtitle_rendering(
+    render_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, session_factory = render_env
+    video, job = _make_video(config, session_factory, with_logo=True)
+    save_cover_region(Path(video.dir_path), CoverRegion(0.05, 0.75, 0.9, 0.2))
+    captured: dict = {}
+    from app.services import render as render_module
+
+    real_build = render_module.build_ffmpeg_command
+
+    def spy(source, output, options):
+        captured["options"] = options
+        return real_build(source, output, options)
+
+    monkeypatch.setattr("app.worker.build_ffmpeg_command", spy)
+
+    Worker(
+        session_factory,
+        {"render": build_render_handler(config, session_factory)},
+    ).run_once()
+
+    stored_job = _reload(session_factory, Job, job.id)
+    assert stored_job.status == "done", stored_job.error
+    assert captured["options"].cover_region is None
+
+
+def test_render_handler_rejects_a_corrupt_cover_region(render_env) -> None:
+    config, session_factory = render_env
+    video, job = _make_video(
+        config, session_factory, with_logo=False, subtitle=True
+    )
+    (Path(video.dir_path) / "cover_region.json").write_text(
+        "not json", encoding="utf-8"
+    )
+    original = Path(video.file_path)
+    original_bytes = original.read_bytes()
+
+    Worker(
+        session_factory,
+        {"render": build_render_handler(config, session_factory)},
+    ).run_once()
+
+    stored_job = _reload(session_factory, Job, job.id)
+    assert stored_job.status == "failed"
+    assert "Vùng che" in (stored_job.error or "")
+    assert not (Path(video.dir_path) / "output_final.mp4").exists()
+    assert original.read_bytes() == original_bytes
 
 
 def test_render_handler_requires_subtitle_data_when_requested(render_env) -> None:

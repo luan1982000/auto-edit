@@ -9,8 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
 
-import yt_dlp
-
 from app.services.ffmpeg_utils import ensure_mp4
 from app.services.urls import detect_platform
 
@@ -194,6 +192,14 @@ def _download_once(
     cookies_browser: str,
     deadline_check: DeadlineCheck | None,
 ) -> DownloadResult:
+    try:
+        import yt_dlp
+    except ImportError as exc:
+        raise DownloadError(
+            "Chưa cài yt-dlp — không tải được video. "
+            "Cài bằng: python -m pip install yt-dlp"
+        ) from exc
+
     if deadline_check is not None:
         deadline_check()
     collector = _CollectingLogger()

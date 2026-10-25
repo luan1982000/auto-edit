@@ -1,9 +1,8 @@
 """System status endpoints (tool availability, later yt-dlp updates)."""
 
-import importlib.util
+import importlib
 import shutil
 
-import yt_dlp
 from fastapi import APIRouter
 
 from app.services.updater import run_update
@@ -11,15 +10,26 @@ from app.services.updater import run_update
 router = APIRouter(prefix="/api", tags=["system"])
 
 
+def _load_yt_dlp():
+    """Import yt-dlp lazily so a broken/missing install cannot abort startup."""
+    try:
+        return importlib.import_module("yt_dlp")
+    except ImportError:
+        return None
+
+
 def tool_status() -> dict[str, object]:
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
-    yt_dlp_available = importlib.util.find_spec("yt_dlp") is not None
+    yt_dlp = _load_yt_dlp()
+    version = None
+    if yt_dlp is not None:
+        version = getattr(getattr(yt_dlp, "version", None), "__version__", None)
     return {
         "ffmpeg": ffmpeg is not None,
         "ffprobe": ffprobe is not None,
-        "yt_dlp": yt_dlp_available,
-        "yt_dlp_version": yt_dlp.version.__version__ if yt_dlp_available else None,
+        "yt_dlp": yt_dlp is not None,
+        "yt_dlp_version": version,
     }
 
 

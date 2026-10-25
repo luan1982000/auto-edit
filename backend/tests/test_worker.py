@@ -376,3 +376,85 @@ def test_failure_of_post_download_job_keeps_video_ready(session_factory) -> None
     stored_video = _reload_video(session_factory, video.id)
     assert stored_video.status == "ready"
     assert stored_video.error is None
+
+
+def _set_job_status(session_factory, job_id: str, status: str) -> None:
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        job.status = status
+        job.message = "Đang chạy"
+        job.progress = 42
+        session.add(job)
+        session.commit()
+
+
+def test_worker_recovers_an_interrupted_download(session_factory) -> None:
+    video, job = _make_download_job(session_factory)
+    _set_job_status(session_factory, job.id, "running")
+
+    worker = Worker(session_factory, {})
+    assert worker.recover_orphaned_jobs() == 1
+
+    stored = _reload(session_factory, job.id)
+    assert stored.status == "failed"
+    assert stored.finished_at is not None
+    assert "khởi động lại" in (stored.error or "")
+    stored_video = _reload_video(session_factory, video.id)
+    assert stored_video.status == "failed"
+    assert stored_video.error == stored.error
+
+
+def test_worker_recovery_keeps_a_ready_video_for_editing_jobs(session_factory) -> None:
+    video, job = _make_download_job(session_factory, job_type="render")
+    with session_factory() as session:
+        stored_video = session.get(Video, video.id)
+        stored_video.status = "ready"
+        session.add(stored_video)
+        session.commit()
+    _set_job_status(session_factory, job.id, "running")
+
+    worker = Worker(session_factory, {})
+    assert worker.recover_orphaned_jobs() == 1
+
+    assert _reload(session_factory, job.id).status == "failed"
+    stored_video = _reload_video(session_factory, video.id)
+    assert stored_video.status == "ready"
+    assert stored_video.error is None
+
+
+def test_worker_recovery_fails_videos_stuck_downloading_without_a_job(
+    session_factory,
+) -> None:
+    video, _ = _make_download_job(session_factory)
+    with session_factory() as session:
+        for job in session.exec(select(Job).where(Job.video_id == video.id)).all():
+            session.delete(job)
+        session.commit()
+
+    Worker(session_factory, {}).recover_orphaned_jobs()
+
+    stored_video = _reload_video(session_factory, video.id)
+    assert stored_video.status == "failed"
+    assert "gián đoạn" in (stored_video.error or "")
+
+
+def test_worker_recovery_leaves_pending_jobs_alone(session_factory) -> None:
+    video, job = _make_download_job(session_factory)
+
+    assert Worker(session_factory, {}).recover_orphaned_jobs() == 0
+
+    assert _reload(session_factory, job.id).status == "pending"
+    assert _reload_video(session_factory, video.id).status == "downloading"
+
+
+def test_worker_start_recovers_orphans_before_polling(session_factory, monkeypatch) -> None:
+    worker = Worker(session_factory, {})
+    calls: list[str] = []
+    monkeypatch.setattr(
+        worker, "recover_orphaned_jobs", lambda: calls.append("recovered") or 0
+    )
+
+    worker.start()
+    worker.stop()
+
+    assert calls == ["recovered"]

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services.cover import CoverRegion
 from app.services.render import LogoOptions, RenderOptions, build_ffmpeg_command
 
 
@@ -290,11 +291,70 @@ def test_unknown_audio_mode_is_rejected(tmp_path: Path) -> None:
         )
 
 
+def test_cover_region_is_drawn_before_logo_and_subtitles(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            cover_region=CoverRegion(0.05, 0.75, 0.9, 0.15),
+            logo=LogoOptions(path=tmp_path / "logo.png"),
+            subtitle_file="subtitle.ass",
+        ),
+    )
+
+    assert _option(cmd, "-filter_complex") == (
+        "[0:v]drawbox=x=54:y=1440:w=972:h=288:color=black@1.0:t=fill[vcover];"
+        "[1:v]scale=162:-2,format=rgba,colorchannelmixer=aa=1[logo];"
+        "[vcover][logo]overlay=main_w-overlay_w-24:24[vlogo];"
+        "[vlogo]ass=subtitle.ass[vout]"
+    )
+    assert _option(cmd, "-map") == "[vout]"
+
+
+def test_cover_region_alone_maps_the_filtered_video(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=320,
+            video_height=240,
+            cover_region=CoverRegion(0.05, 0.75, 0.9, 0.2),
+        ),
+    )
+
+    assert (
+        _option(cmd, "-filter_complex")
+        == "[0:v]drawbox=x=16:y=180:w=288:h=48:color=black@1.0:t=fill[vout]"
+    )
+    assert _option(cmd, "-map") == "[vout]"
+    assert _option(cmd, "-c:a") == "copy"
+
+
+def test_cover_region_with_subtitle_uses_cover_as_base(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=100,
+            video_height=100,
+            cover_region=CoverRegion(0.1, 0.7, 0.8, 0.2),
+            subtitle_file="subtitle.ass",
+        ),
+    )
+
+    assert _option(cmd, "-filter_complex") == (
+        "[0:v]drawbox=x=10:y=70:w=80:h=20:color=black@1.0:t=fill[vcover];"
+        "[vcover]ass=subtitle.ass[vout]"
+    )
+
+
 @pytest.mark.parametrize(
-    ("logo", "subtitle", "voice"), list(product([False, True], repeat=3))
+    ("logo", "subtitle", "voice", "cover"), list(product([False, True], repeat=4))
 )
 def test_every_checkbox_combination_builds_one_ffmpeg_command(
-    tmp_path: Path, logo: bool, subtitle: bool, voice: bool
+    tmp_path: Path, logo: bool, subtitle: bool, voice: bool, cover: bool
 ) -> None:
     logo_path = tmp_path / "logo.png"
     voice_path = tmp_path / "voice.mp3"
@@ -307,16 +367,21 @@ def test_every_checkbox_combination_builds_one_ffmpeg_command(
             logo=LogoOptions(path=logo_path) if logo else None,
             subtitle_file="subtitle.ass" if subtitle else None,
             voice_path=voice_path if voice else None,
+            cover_region=CoverRegion(0.05, 0.75, 0.9, 0.15) if cover else None,
             audio_mode="duck",
         ),
     )
 
     assert cmd[0] == "ffmpeg"
-    assert cmd.count("-filter_complex") == (1 if (logo or subtitle or voice) else 0)
+    has_video_filter = logo or subtitle or cover
+    assert cmd.count("-filter_complex") == (
+        1 if (has_video_filter or voice) else 0
+    )
     assert (str(logo_path) in cmd) is logo
     assert ("ass=subtitle.ass" in " ".join(cmd)) is subtitle
     assert (str(voice_path) in cmd) is voice
-    assert _option(cmd, "-map") == ("[vout]" if (logo or subtitle) else "0:v:0")
+    assert ("drawbox=" in " ".join(cmd)) is cover
+    assert _option(cmd, "-map") == ("[vout]" if has_video_filter else "0:v:0")
     assert ("[aout]" in cmd) is voice
     if voice:
         assert _option(cmd, "-c:a") == "aac"

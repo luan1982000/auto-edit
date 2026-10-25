@@ -2,23 +2,44 @@
 
 from __future__ import annotations
 
+import json
 import platform
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
 from app.config import AppConfig
 from app.db import get_session
 from app.ids import new_id
-from app.models import Job, Video
+from app.models import Job, Video, utcnow
 from app.routers.common import get_config as _config
 from app.routers.common import get_video as _get_video
 from app.schemas import DownloadRequest, DownloadResponse, DuplicateInfo, VideoRead
+from app.services.ffmpeg_utils import FFmpegError, make_thumbnail, probe_video
+from app.services.uploads import (
+    MAX_UPLOAD_BYTES,
+    UploadError,
+    convert_to_mp4,
+    remove_upload_dir,
+    sanitize_upload_name,
+    save_upload,
+    upload_size_label,
+    upload_title,
+)
 from app.services.urls import detect_platform
 
 router = APIRouter(prefix="/api", tags=["videos"])
@@ -31,6 +52,105 @@ def _safe_video_path(video: Video, config: AppConfig, path: Path) -> Path:
     if not resolved.is_relative_to(video_dir):
         raise HTTPException(status_code=400, detail="Đường dẫn file không hợp lệ")
     return resolved
+
+
+@router.post("/upload", response_model=VideoRead, status_code=201)
+def upload_video(
+    request: Request,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+) -> Video:
+    """Store a local video, normalise it to MP4, and add it to the library."""
+    config = _config(request)
+    try:
+        original_name = sanitize_upload_name(file.filename)
+    except UploadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    declared_size = getattr(file, "size", None)
+    if isinstance(declared_size, int) and declared_size > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Video quá lớn — tối đa {upload_size_label(MAX_UPLOAD_BYTES)}",
+        )
+
+    video_id = new_id()
+    video_dir = config.videos_dir / video_id
+    extension = Path(original_name).suffix.lower()
+    upload_path = video_dir / f"upload{extension}"
+    target = video_dir / "original.mp4"
+    thumb_path = video_dir / "thumb.jpg"
+    title = upload_title(original_name)
+
+    try:
+        video_dir.mkdir(parents=True, exist_ok=False)
+        save_upload(file.file, upload_path, MAX_UPLOAD_BYTES)
+        convert_to_mp4(upload_path, target)
+
+        probed = probe_video(target)
+        duration = float(probed["duration_sec"])
+        if duration <= 0:
+            raise UploadError("Video tải lên không có thời lượng hợp lệ")
+
+        try:
+            make_thumbnail(
+                target, thumb_path, at_sec=min(1.0, max(duration / 2, 0.1))
+            )
+            stored_thumb: Path | None = thumb_path
+        except FFmpegError:
+            stored_thumb = None
+
+        meta = {
+            "source": "upload",
+            "original_name": original_name,
+            "title": title,
+            "duration_sec": duration,
+            "width": int(probed["width"]),
+            "height": int(probed["height"]),
+            "has_audio": bool(probed["has_audio"]),
+            "uploaded_at": utcnow().isoformat(),
+        }
+        (video_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        video = Video(
+            id=video_id,
+            source_url="",
+            platform="upload",
+            title=title,
+            duration_sec=round(duration, 3),
+            width=int(probed["width"]),
+            height=int(probed["height"]),
+            dir_path=str(video_dir),
+            file_path=str(target),
+            thumb_path=str(stored_thumb) if stored_thumb else "",
+            status="ready",
+            error=None,
+        )
+        session.add(video)
+        session.commit()
+        session.refresh(video)
+        return video
+    except HTTPException:
+        remove_upload_dir(config.videos_dir, video_dir)
+        raise
+    except UploadError as exc:
+        remove_upload_dir(config.videos_dir, video_dir)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FFmpegError as exc:
+        remove_upload_dir(config.videos_dir, video_dir)
+        raise HTTPException(
+            status_code=400, detail=f"Không xử lý được video tải lên: {exc}"
+        ) from exc
+    except OSError as exc:
+        remove_upload_dir(config.videos_dir, video_dir)
+        raise HTTPException(
+            status_code=500, detail=f"Không lưu được video tải lên: {exc}"
+        ) from exc
+    except Exception:
+        remove_upload_dir(config.videos_dir, video_dir)
+        raise
 
 
 @router.post("/download", response_model=DownloadResponse)

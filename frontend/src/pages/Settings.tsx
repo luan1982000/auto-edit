@@ -13,6 +13,7 @@ import {
   SpinnerIcon,
   TrashIcon,
 } from "../components/Icons";
+import { TARGET_LANGUAGES } from "../lib/languages";
 import { TTS_VOICES } from "../lib/voices";
 
 const inputClass =
@@ -380,12 +381,23 @@ export function SettingsPage() {
             ))}
           </select>
         </Field>
-        <Field label="Ngôn ngữ đích" hint="Ví dụ: vi, en, zh">
-          <input
+        <Field
+          label="Ngôn ngữ đích"
+          hint="Dùng làm mặc định khi tạo hoặc dịch phụ đề; vẫn đổi được cho từng video."
+        >
+          <select
             className={inputClass}
             value={form.target_language}
-            onChange={(event) => update("target_language", event.target.value)}
-          />
+            onChange={(event) =>
+              update("target_language", event.target.value)
+            }
+          >
+            {TARGET_LANGUAGES.map((language) => (
+              <option key={language.value} value={language.value}>
+                {language.label} ({language.value})
+              </option>
+            ))}
+          </select>
         </Field>
         <Field label="Vị trí phụ đề">
           <select

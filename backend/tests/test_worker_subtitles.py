@@ -81,12 +81,14 @@ class FakeTranscriber:
         duration_sec: float,
         on_progress,
         deadline_check=None,
+        language=None,
     ) -> TranscriptionResult:
         self.calls.append(
             {
                 "audio": audio_path,
                 "model": model_name,
                 "duration": duration_sec,
+                "language": language,
             }
         )
         on_progress(50, "Đang nhận dạng...")
@@ -135,6 +137,7 @@ def test_transcribe_handler_saves_json_and_srt(
             "audio": config.videos_dir / video.id / "audio.wav",
             "model": "small",
             "duration": 10.0,
+            "language": None,
         }
     ]
     assert extract_calls == [
@@ -153,6 +156,104 @@ def test_transcribe_handler_saves_json_and_srt(
     srt = (config.videos_dir / video.id / "subtitle.srt").read_text(encoding="utf-8")
     assert "你好" in srt
     assert "世界" in srt
+
+
+def test_transcribe_handler_uses_the_selected_source_language(
+    session_factory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data", _env_file=None)
+    video, job = _setup_video(
+        session_factory,
+        config,
+        "transcribe",
+        {"model": "small", "source_language": " VI ", "translate": False},
+    )
+    _fake_extract(monkeypatch)
+    transcriber = FakeTranscriber(TranscriptionResult("vi", ZH_SEGMENTS))
+
+    worker = Worker(
+        session_factory,
+        {"transcribe": build_transcribe_handler(config, session_factory, transcriber)},
+    )
+    worker.run_once()
+
+    assert _reload(session_factory, job.id).status == "done"
+    assert transcriber.calls[0]["language"] == "vi"
+
+
+def test_transcribe_handler_auto_source_language_is_none(
+    session_factory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data", _env_file=None)
+    video, job = _setup_video(
+        session_factory,
+        config,
+        "transcribe",
+        {"model": "small", "source_language": "auto", "translate": False},
+    )
+    _fake_extract(monkeypatch)
+    transcriber = FakeTranscriber(TranscriptionResult("zh", ZH_SEGMENTS))
+
+    worker = Worker(
+        session_factory,
+        {"transcribe": build_transcribe_handler(config, session_factory, transcriber)},
+    )
+    worker.run_once()
+
+    assert _reload(session_factory, job.id).status == "done"
+    assert transcriber.calls[0]["language"] is None
+
+
+def test_transcribe_handler_rejects_unsupported_source_language(
+    session_factory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data", _env_file=None)
+    video, job = _setup_video(
+        session_factory,
+        config,
+        "transcribe",
+        {"source_language": "xx"},
+    )
+    extract_calls = _fake_extract(monkeypatch)
+    transcriber = FakeTranscriber(TranscriptionResult("zh", ZH_SEGMENTS))
+
+    worker = Worker(
+        session_factory,
+        {"transcribe": build_transcribe_handler(config, session_factory, transcriber)},
+    )
+    worker.run_once()
+
+    stored = _reload(session_factory, job.id)
+    assert stored.status == "failed"
+    assert "ngôn ngữ nguồn" in (stored.error or "").lower()
+    assert extract_calls == []
+    assert transcriber.calls == []
+
+
+def test_transcribe_handler_rejects_unsupported_target_language(
+    session_factory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data", _env_file=None)
+    video, job = _setup_video(
+        session_factory,
+        config,
+        "transcribe",
+        {"translate": True, "target_language": "xx"},
+    )
+    extract_calls = _fake_extract(monkeypatch)
+    transcriber = FakeTranscriber(TranscriptionResult("zh", ZH_SEGMENTS))
+
+    worker = Worker(
+        session_factory,
+        {"transcribe": build_transcribe_handler(config, session_factory, transcriber)},
+    )
+    worker.run_once()
+
+    stored = _reload(session_factory, job.id)
+    assert stored.status == "failed"
+    assert "ngôn ngữ đích" in (stored.error or "").lower()
+    assert extract_calls == []
+    assert transcriber.calls == []
 
 
 def test_transcribe_handler_can_translate_in_the_same_job(
@@ -349,6 +450,32 @@ def test_translate_handler_restores_source_for_same_language(
     assert data.segments == ZH_SEGMENTS
     assert data.translated is False
     assert data.target_language == "zh"
+
+
+def test_translate_handler_rejects_unsupported_target_language(
+    session_factory, tmp_path: Path
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data", _env_file=None)
+    video, job = _setup_video(
+        session_factory, config, "translate", {"target_language": "xx"}
+    )
+    _write_subtitle(config, video)
+
+    worker = Worker(
+        session_factory,
+        {
+            "translate": build_translate_handler(
+                config, session_factory, lambda *a, **k: []
+            )
+        },
+    )
+    worker.run_once()
+
+    stored = _reload(session_factory, job.id)
+    assert stored.status == "failed"
+    assert "ngôn ngữ đích" in (stored.error or "").lower()
+    data = load_subtitle_data(config.videos_dir / video.id / "subtitle.json")
+    assert data.segments == ZH_SEGMENTS
 
 
 def test_translate_handler_requires_subtitles(session_factory, tmp_path: Path) -> None:

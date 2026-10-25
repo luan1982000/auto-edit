@@ -89,3 +89,24 @@ def test_result_from_info_picks_largest_original_file(tmp_path: Path) -> None:
     large.write_bytes(b"x" * 100)
     result = result_from_info({"title": "clip"}, tmp_path)
     assert result.file_path == large
+
+
+def test_download_reports_a_missing_ytdlp_dependency(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import sys
+
+    import pytest
+
+    from app.services.downloader import DownloadError, _download_once
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", None)
+
+    with pytest.raises(DownloadError, match="yt-dlp"):
+        _download_once(
+            "https://www.youtube.com/shorts/abc",
+            tmp_path,
+            progress_cb=None,
+            cookies_browser="",
+            deadline_check=None,
+        )

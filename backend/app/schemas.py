@@ -3,6 +3,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.services.languages import (
+    normalize_source_language,
+    normalize_target_language,
+)
 from app.services.urls import validate_url
 
 LogoPosition = Literal["tl", "tr", "bl", "br"]
@@ -64,6 +68,7 @@ class VideoRead(BaseModel):
     has_subtitle: bool
     has_voice: bool
     has_output: bool
+    output_version: int
     created_at: datetime
 
 
@@ -101,9 +106,16 @@ class SettingsUpdate(BaseModel):
     subtitle_font: str | None = None
     subtitle_size: int | None = Field(default=None, ge=8, le=200)
     subtitle_position: SubtitlePosition | None = None
-    target_language: str | None = None
+    target_language: str | None = Field(default=None, max_length=20)
     whisper_model: str | None = None
     cookies_browser: str | None = None
+
+    @field_validator("target_language")
+    @classmethod
+    def _validate_target_language(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_target_language(value)
 
 
 class RenderRequest(BaseModel):
@@ -146,6 +158,54 @@ class SubtitleUpdate(BaseModel):
 
 class TranscribeRequest(BaseModel):
     translate: bool = False
+    source_language: str | None = Field(default=None, max_length=20)
+    target_language: str | None = Field(default=None, max_length=20)
+
+    @field_validator("source_language")
+    @classmethod
+    def _validate_source_language(cls, value: str | None) -> str | None:
+        return normalize_source_language(value)
+
+    @field_validator("target_language")
+    @classmethod
+    def _validate_target_language(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_target_language(value)
+
+
+class CoverRegionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class CoverRegionPayload(BaseModel):
+    x: float = Field(ge=0, le=1, allow_inf_nan=False)
+    y: float = Field(ge=0, le=1, allow_inf_nan=False)
+    width: float = Field(gt=0, le=1, allow_inf_nan=False)
+    height: float = Field(gt=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> "CoverRegionPayload":
+        if self.x + self.width > 1 + 1e-9:
+            raise ValueError("Vùng che vượt quá chiều rộng video")
+        if self.y + self.height > 1 + 1e-9:
+            raise ValueError("Vùng che vượt quá chiều cao video")
+        return self
+
+
+class SampleFrameRead(BaseModel):
+    time: float
+    url: str
+
+
+class SampleFramesRead(BaseModel):
+    frames: list[SampleFrameRead]
+    region: CoverRegionRead | None = None
 
 
 class TtsRequest(BaseModel):
@@ -170,9 +230,11 @@ class TtsPreviewRequest(BaseModel):
 
 
 class TranslateRequest(BaseModel):
-    target_language: str | None = Field(
-        default=None,
-        min_length=2,
-        max_length=10,
-        pattern=r"^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$",
-    )
+    target_language: str | None = Field(default=None, max_length=20)
+
+    @field_validator("target_language")
+    @classmethod
+    def _validate_target_language(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_target_language(value)

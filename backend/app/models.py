@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
@@ -26,6 +27,16 @@ class Video(SQLModel, table=True):
     has_voice: bool = False
     has_output: bool = False
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+    @property
+    def output_version(self) -> int:
+        """Cache key that changes whenever output_final.mp4 is rewritten."""
+        if not self.dir_path:
+            return 0
+        try:
+            return (Path(self.dir_path) / "output_final.mp4").stat().st_mtime_ns
+        except OSError:
+            return 0
 
 
 class Job(SQLModel, table=True):

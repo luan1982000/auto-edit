@@ -31,6 +31,7 @@ const PLATFORM_LABELS: Record<string, string> = {
   youtube: "YouTube",
   douyin: "Douyin",
   tiktok: "TikTok",
+  upload: "Tải lên",
   other: "Khác",
 };
 
@@ -39,6 +40,7 @@ const PLATFORM_STYLES: Record<string, string> = {
   youtube: "bg-red-500/15 text-red-300 ring-red-400/25",
   douyin: "bg-zinc-100/10 text-zinc-200 ring-white/20",
   tiktok: "bg-cyan-500/15 text-cyan-300 ring-cyan-400/25",
+  upload: "bg-emerald-500/15 text-emerald-300 ring-emerald-400/25",
   other: "bg-white/5 text-zinc-300 ring-white/10",
 };
 

@@ -14,6 +14,7 @@ export interface Video {
   has_subtitle: boolean;
   has_voice: boolean;
   has_output: boolean;
+  output_version: number;
   created_at: string;
 }
 
@@ -99,6 +100,29 @@ export interface RenderOptions {
   keep_original_audio: AudioMode;
 }
 
+export interface CoverRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SampleFrame {
+  time: number;
+  url: string;
+}
+
+export interface SampleFramesResponse {
+  frames: SampleFrame[];
+  region: CoverRegion | null;
+}
+
+export interface TranscribeOptions {
+  translate: boolean;
+  sourceLanguage: string | null;
+  targetLanguage: string | null;
+}
+
 async function readError(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json();
@@ -148,6 +172,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ urls, force }),
     }),
+  uploadVideo: (file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request<Video>("/api/upload", { method: "POST", body });
+  },
   openFolder: (id: string) =>
     request<{ opened: boolean }>(`/api/videos/${id}/open-folder`, {
       method: "POST",
@@ -190,10 +219,14 @@ export const api = {
 
   subtitle: (id: string) =>
     request<SubtitleData>(`/api/videos/${id}/subtitle`),
-  transcribe: (id: string, translate: boolean) =>
+  transcribe: (id: string, options: TranscribeOptions) =>
     request<Job>(`/api/videos/${id}/transcribe`, {
       method: "POST",
-      body: JSON.stringify({ translate }),
+      body: JSON.stringify({
+        translate: options.translate,
+        source_language: options.sourceLanguage,
+        target_language: options.targetLanguage,
+      }),
     }),
   translate: (id: string, targetLanguage?: string) =>
     request<Job>(`/api/videos/${id}/translate`, {
@@ -202,6 +235,19 @@ export const api = {
         targetLanguage ? { target_language: targetLanguage } : {},
       ),
     }),
+  sampleFrames: (id: string) =>
+    request<SampleFramesResponse>(`/api/videos/${id}/sample-frames`, {
+      method: "POST",
+    }),
+  coverRegion: (id: string) =>
+    request<CoverRegion | null>(`/api/videos/${id}/cover-region`),
+  saveCoverRegion: (id: string, region: CoverRegion) =>
+    request<CoverRegion>(`/api/videos/${id}/cover-region`, {
+      method: "PUT",
+      body: JSON.stringify(region),
+    }),
+  deleteCoverRegion: (id: string) =>
+    request<void>(`/api/videos/${id}/cover-region`, { method: "DELETE" }),
   saveSubtitle: (id: string, segments: SubtitleSegment[]) =>
     request<SubtitleData>(`/api/videos/${id}/subtitle`, {
       method: "PUT",

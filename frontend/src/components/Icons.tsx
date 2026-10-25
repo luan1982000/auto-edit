@@ -31,6 +31,15 @@ export function DownloadIcon(props: IconProps) {
   );
 }
 
+export function UploadIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M12 16V5m0 0 4 4m-4-4L8 9" />
+      <path d="M5 19h14" />
+    </svg>
+  );
+}
+
 export function FolderIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

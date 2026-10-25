@@ -4,8 +4,9 @@ Web app chạy **local** để tải video (Facebook Reel, Douyin, TikTok, YouTu
 phụ đề và giọng đọc, chèn logo rồi render ra một file hoàn chỉnh. Không đăng nhập, không cloud,
 không multi-user.
 
-> **Trạng thái: Phase 6/6** — tải video, phụ đề (Whisper + DeepSeek), TTS, logo, render gộp một
-> lệnh ffmpeg, preset và đầy đủ UI. Xem [implemented/](implemented/) để đối chiếu từng phase.
+> **Trạng thái: Phase 6/6 + bổ sung** — tải video từ link hoặc file trong máy, phụ đề (Whisper +
+> DeepSeek), che phụ đề cũ, TTS, logo, render gộp một lệnh ffmpeg, preset và đầy đủ UI. Xem
+> [implemented/](implemented/) để đối chiếu từng phase.
 
 ## Yêu cầu
 
@@ -48,11 +49,17 @@ make build             # build frontend
 ## Cách dùng
 
 1. Dán một hoặc nhiều link vào ô **Danh sách link**, mỗi dòng một link. Chỉ nhận `http/https`.
-   Bấm **Tải video** — mỗi link tạo một job `download` chạy trong worker thread.
+   Bấm **Tải video** — mỗi link tạo một job `download` chạy trong worker thread. Hoặc dùng ô
+   **Hoặc tải video từ máy** để chọn/kéo thả file có sẵn (tối đa **2 GB**); app chuẩn hoá về
+   `original.mp4` rồi thêm thẳng vào thư viện.
 2. Video tải xong xuất hiện trong **Thư viện**. Click để mở trang chi tiết và phát video (hỗ trợ
    tua — HTTP Range).
-3. **Tạo phụ đề**: bấm **Nhận dạng** (Whisper, tuỳ chọn dịch luôn), hoặc **Dịch lại** nếu đã có phụ
-   đề. Sửa trực tiếp trong bảng, thêm/xoá dòng, rồi **Lưu phụ đề**.
+3. **Tạo phụ đề**: bấm **Tạo phụ đề** hoặc **Tạo + dịch**. Hộp thoại chụp 2–3 khung hình trong
+   video để bạn khoanh đúng vùng phụ đề cũ, chọn ngôn ngữ nói (hoặc để tự động) và ngôn ngữ đích,
+   rồi bắt đầu. Vùng che được lưu theo từng video và áp dụng khi render. Với video đã có phụ đề,
+   dùng **Tạo lại phụ đề** để nhận dạng lại từ đầu (có xác nhận vì thay toàn bộ phụ đề hiện tại),
+   **Dịch sang …** để chọn lại ngôn ngữ đích, hoặc **Vùng che** để chỉnh vùng che. Sửa trực tiếp
+   trong bảng, thêm/xoá dòng, rồi **Lưu**.
 4. **Tạo giọng đọc**: chọn giọng và tốc độ, nghe thử một câu, bấm **Tạo giọng đọc**. Giọng được
    sinh cho từng segment và ghép đúng timeline phụ đề.
 5. **Render**: chọn Logo / Phụ đề / Giọng đọc, chọn chế độ âm thanh gốc (`duck` / `keep` /
@@ -85,6 +92,8 @@ data/
     original.mp4            # KHÔNG BAO GIỜ bị ghi đè
     thumb.jpg
     meta.json
+    frames/sample-*.jpg     # ảnh mẫu để khoanh vùng phụ đề cũ
+    cover_region.json       # vùng che phụ đề cũ (toạ độ chuẩn hoá 0..1)
     subtitle.json           # nguồn + bản dịch
     subtitle.srt
     subtitle.ass            # sinh khi render phụ đề
@@ -137,6 +146,14 @@ theo **% chiều rộng video**, giữ tỉ lệ, áp opacity và margin khi ren
 
 - **Whisper local** (`faster-whisper`), model chọn trong Cài đặt (`tiny` / `base` / `small` /
   `medium`...). Model được cache trong tiến trình; lần đầu dùng một model sẽ tải về.
+- **Chọn ngôn ngữ**: hộp thoại tạo phụ đề cho chọn ngôn ngữ nói (mặc định **Tự động nhận dạng**;
+  hỗ trợ 24 mã Whisper) và ngôn ngữ đích cho DeepSeek (25 lựa chọn, gồm cả Trung Phồn thể). Mỗi
+  lần dịch lại đều chọn được ngôn ngữ đích khác với Cài đặt.
+- **Che phụ đề cũ**: trước khi transcribe, backend chụp 3 khung hình (15% / 50% / 85% thời lượng)
+  và trả về cho UI. Bạn kéo chuột khoanh vùng phụ đề cũ trên ảnh, hoặc dùng preset Dải dưới / Dải
+  trên / Giữa khung. Toạ độ lưu chuẩn hoá `0..1` trong `cover_region.json`, nên đúng với mọi độ
+  phân giải. Khi render phụ đề, vùng này được phủ kín bằng `drawbox` **trước** logo và ASS mới;
+  video gốc không bị sửa. Nếu chưa chọn vùng, phụ đề cũ (nếu có) vẫn có thể hiện phía sau.
 - Audio được tách thành WAV 16 kHz mono, nhận dạng có VAD; progress cập nhật theo timestamp.
 - Phụ đề lưu `subtitle.json` (giữ cả bản nguồn để **Dịch lại**) và `subtitle.srt`.
 - Khi burn, app sinh `subtitle.ass` theo kích thước video, font/cỡ/vị trí trong Cài đặt; tự xuống
@@ -181,7 +198,8 @@ Toàn bộ logo + phụ đề + voice được gộp vào **một lệnh ffmpeg 
 - Nếu tải Douyin thất bại, thông báo lỗi giữ nguyên lỗi gốc của yt-dlp kèm gợi ý: chọn cookies
   trình duyệt, cập nhật yt-dlp, hoặc bật fallback.
 - Nút **Cập nhật yt-dlp** ở Cài đặt chạy `python -m pip install --upgrade yt-dlp` và hiển thị
-  output. yt-dlp đã import trong tiến trình cũ, nên **khởi động lại backend** sau khi cập nhật.
+  output. Module yt-dlp đã nạp trong tiến trình cũ (từ lần tải đầu tiên), nên **khởi động lại
+  backend** sau khi cập nhật.
 
 #### Fallback HTTP (tuỳ chọn, mặc định tắt)
 
@@ -203,15 +221,19 @@ DOUYIN_FALLBACK_URL=http://127.0.0.1:9000/download
 | Method | Endpoint | Ghi chú |
 |---|---|---|
 | POST | `/api/download` | `{urls: string[], force?: bool}` → `{jobs, duplicates}` |
+| POST | `/api/upload` | Multipart `file` → video `ready`; tối đa 2 GB, chuẩn hoá về MP4 |
 | GET | `/api/videos` | Mới nhất trước |
-| GET | `/api/videos/{id}` | Chi tiết + `has_subtitle` / `has_voice` / `has_output` |
+| GET | `/api/videos/{id}` | Chi tiết + `has_subtitle` / `has_voice` / `has_output` / `output_version` |
 | DELETE | `/api/videos/{id}` | Xoá record + thư mục + job liên quan |
 | GET | `/api/videos/{id}/file?variant=original\|output` | Stream, hỗ trợ Range |
 | GET | `/api/videos/{id}/thumb` | JPEG |
 | POST | `/api/videos/{id}/open-folder` | Mở Finder/Explorer |
-| POST | `/api/videos/{id}/transcribe` | `{translate?: bool}` → job transcribe (+ dịch) |
+| POST | `/api/videos/{id}/transcribe` | `{translate?, source_language?, target_language?}` → job transcribe (+ dịch) |
 | POST | `/api/videos/{id}/translate` | `{target_language?}` → job dịch lại từ bản nguồn |
 | GET/PUT | `/api/videos/{id}/subtitle` | Đọc/lưu `{segments: [{start,end,text}]}` |
+| POST | `/api/videos/{id}/sample-frames` | Chụp 3 ảnh mẫu, trả `{frames: [{time,url}], region}` |
+| GET | `/api/videos/{id}/frames/{name}` | Chỉ phục vụ `sample-N.jpg` đã sinh, `no-store` |
+| GET/PUT/DELETE | `/api/videos/{id}/cover-region` | Đọc/lưu/xoá vùng che phụ đề cũ (toạ độ `0..1`) |
 | POST | `/api/videos/{id}/tts` | `{voice?, rate?}` → job tạo `voice.mp3` |
 | POST | `/api/tts/preview` | `{text, voice?, rate?}` → MP3 nghe thử |
 | POST | `/api/videos/{id}/render` | `{logo, subtitle, voice, keep_original_audio}` → job render |
@@ -234,6 +256,10 @@ DOUYIN_FALLBACK_URL=http://127.0.0.1:9000/download
   render/TTS có thêm timeout riêng cho ffmpeg/edge-tts.
 - **Thumbnail lỗi không làm fail job**: video vẫn `ready`, chỉ thiếu ảnh bìa.
 - **Re-download luôn tạo id/thư mục mới** (`force=true`), bảo đảm không ghi đè `original.mp4`.
+- **Upload video từ máy** cũng tạo id/thư mục mới, không dùng tên file làm đường dẫn. Chỉ nhận
+  đuôi video trong whitelist, stream xuống đĩa theo chunk và chặn quá **2 GB**; sau đó remux sang
+  MP4, fallback transcode H.264/AAC nếu container/codec không tương thích. File hỏng bị xoá cùng
+  thư mục tạm, không tạo record rác.
 - **Chuẩn hoá Douyin**: chỉ chấp nhận redirect về host `douyin.com`/`iesdouyin.com`; nếu resolve
   lỗi hoặc redirect ra ngoài, app dùng URL gốc để yt-dlp vẫn thử được.
 - **Retry** áp dụng cho mọi `DownloadError` của yt-dlp (kể cả login/unsupported) để đơn giản;
@@ -250,6 +276,15 @@ DOUYIN_FALLBACK_URL=http://127.0.0.1:9000/download
 - **Render một pass**: mọi filter video/audio nằm trong một `-filter_complex`, output tạm rồi
   `replace`; progress parse từ `-progress pipe:1`.
 - **Preset render** lưu ở cột `render_preset`; DB cũ được migrate idempotent bằng `ALTER TABLE`.
+- **Che phụ đề cũ** dùng `drawbox=t=fill` đen đặc nối trước logo/ASS trong cùng filter graph. Vùng
+  chọn tay từ ảnh mẫu thay vì OCR/vision để không thêm dependency và luôn kiểm soát được kết quả.
+  File `cover_region.json` hỏng làm job render fail rõ ràng thay vì che sai chỗ.
+- **Cache-bust output**: `VideoRead.output_version` là `mtime_ns` của `output_final.mp4`; frontend
+  đổi query `?v=` và key player mỗi khi render xong, kể cả lần render thứ hai trở đi.
+- **Job mồ côi**: lúc worker khởi động, job còn `running` từ tiến trình cũ được đánh `failed` kèm
+  lý do; video đang `downloading` không còn job active cũng được đánh `failed` để không treo UI.
+- **yt-dlp import lazy**: thiếu/hỏng yt-dlp không làm app chết lúc import; `/api/health` báo
+  `yt_dlp: false`, job tải báo lỗi cài đặt rõ ràng.
 - **TTS**: mỗi segment một file tạm; audio dài hơn khung được tăng tốc tối đa 1.4x, quá nữa thì tràn
   nhẹ sang khoảng trống kế tiếp (đúng PLAN). Voice luôn được `apad` + cắt theo thời lượng video.
 - **Ducking** dùng `volume=0.2` trên âm gốc (đơn giản, ổn định) thay vì sidechaincompress.
@@ -263,6 +298,8 @@ DOUYIN_FALLBACK_URL=http://127.0.0.1:9000/download
 |---|---|
 | `ffmpeg not found` / badge “Thiếu công cụ” | Cài ffmpeg và mở lại app |
 | Facebook/Douyin báo lỗi login / 403 | Chọn cookies trình duyệt trong Settings |
+| Upload báo “Chỉ hỗ trợ video …” | Chọn file MP4/MOV/M4V/MKV/WEBM/AVI/MPEG/MPG/WMV/FLV; đổi đuôi file không làm file hợp lệ |
+| Upload báo “Video quá lớn” | File vượt 2 GB — nén hoặc cắt bớt trước khi tải lên |
 | yt-dlp lỗi “Unsupported URL” / extractor hỏng | Bấm **Cập nhật yt-dlp** trong Cài đặt (hoặc `.venv/bin/pip install -U yt-dlp`), rồi khởi động lại backend |
 | Douyin vẫn lỗi | Chọn cookies trình duyệt, cập nhật yt-dlp; nếu vẫn lỗi, bật `DOUYIN_FALLBACK_URL` |
 | Job dịch báo thiếu `DEEPSEEK_API_KEY` | Điền key vào `.env`, restart backend |
@@ -273,6 +310,8 @@ DOUYIN_FALLBACK_URL=http://127.0.0.1:9000/download
 | Nghe thử báo 502 | edge-tts không kết nối được; xem chi tiết lỗi trong thông báo |
 | Render báo “Chưa upload logo” | Upload logo trong Cài đặt hoặc bỏ chọn Logo |
 | Render báo “Chưa có phụ đề/giọng đọc” | Tạo thành phần tương ứng trước, hoặc bỏ chọn checkbox |
+| Phụ đề cũ vẫn hiện sau khi burn | Mở **Vùng che**, khoanh lại đúng dải phụ đề cũ rồi lưu; kiểm tra checkbox Phụ đề khi render |
+| Không chụp được ảnh mẫu | Kiểm tra ffmpeg và file gốc; có thể tiếp tục transcribe với vùng che đã lưu |
 | Output không có tiếng | Kiểm tra video gốc có audio; với voice, thử chế độ `keep`/`duck` và xem lại file gốc |
 
 Video Douyin có watermark chạy ngang — ngoài scope, không xử lý.
@@ -286,6 +325,10 @@ Video Douyin có watermark chạy ngang — ngoài scope, không xử lý.
 - **Phase 5 (xong)**: edge-tts khớp timing, mix audio `mute`/`duck`/`keep`.
 - **Phase 6 (xong)**: render gộp 1 lệnh ffmpeg, progress thật, preset, tab Original/Output,
   dọn file tạm, README/tài liệu.
+- **Phase 7 (bổ sung 2026-10-25)**: chọn ngôn ngữ nguồn/đích, chụp ảnh mẫu và che phụ đề cũ,
+  cache-bust output, khôi phục job mồ côi, yt-dlp import lazy.
+- **Phase 8 (bổ sung 2026-10-25)**: upload video có sẵn từ máy vào thư viện, chuẩn hoá MP4,
+  giới hạn 2 GB và kiểm tra file an toàn.
 
 Chi tiết từng phase, file thay đổi và kết quả kiểm chứng nằm trong [implemented/](implemented/).
 

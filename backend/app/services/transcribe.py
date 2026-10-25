@@ -31,6 +31,7 @@ class Transcriber(Protocol):
         duration_sec: float,
         on_progress: ProgressCallback,
         deadline_check: Callable[[], None] | None = None,
+        language: str | None = None,
     ) -> TranscriptionResult: ...
 
 
@@ -65,20 +66,23 @@ class FasterWhisperTranscriber:
         duration_sec: float,
         on_progress: ProgressCallback,
         deadline_check: Callable[[], None] | None = None,
+        language: str | None = None,
     ) -> TranscriptionResult:
         if not audio_path.is_file():
             raise TranscriptionError(f"File audio không tồn tại: {audio_path}")
 
         model = self._get_model(model_name)
         segments: list[SubtitleSegment] = []
-        language = ""
+        language_code = ""
+        options: dict[str, object] = {"vad_filter": True, "beam_size": 5}
+        if language:
+            options["language"] = language
         try:
             raw_segments, info = model.transcribe(  # type: ignore[attr-defined]
                 str(audio_path),
-                vad_filter=True,
-                beam_size=5,
+                **options,
             )
-            language = str(getattr(info, "language", "") or "")
+            language_code = str(getattr(info, "language", "") or "")
             for raw in raw_segments:
                 if deadline_check is not None:
                     deadline_check()
@@ -98,4 +102,4 @@ class FasterWhisperTranscriber:
         except Exception as exc:  # noqa: BLE001 - surface model failures as job errors
             raise TranscriptionError(f"Nhận dạng giọng nói thất bại: {exc}") from exc
 
-        return TranscriptionResult(language=language, segments=segments)
+        return TranscriptionResult(language=language_code, segments=segments)

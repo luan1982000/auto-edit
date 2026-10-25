@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 from sqlmodel import Session
 
 from app.config import AppConfig
@@ -18,13 +20,24 @@ from app.routers.common import (
     safe_source,
 )
 from app.schemas import (
+    CoverRegionPayload,
+    CoverRegionRead,
     JobRead,
+    SampleFrameRead,
+    SampleFramesRead,
     SubtitleRead,
     SubtitleSegmentIn,
     SubtitleUpdate,
     TranscribeRequest,
     TranslateRequest,
 )
+from app.services.cover import (
+    CoverRegion,
+    CoverRegionError,
+    load_cover_region,
+    save_cover_region,
+)
+from app.services.ffmpeg_utils import FFmpegError, extract_sample_frames, probe_video
 from app.services.subtitles import (
     SubtitleData,
     SubtitleError,
@@ -36,6 +49,7 @@ from app.services.subtitles import (
 from app.settings_store import get_or_create_settings
 
 router = APIRouter(prefix="/api", tags=["subtitles"])
+SAMPLE_FRAME_NAME = re.compile(r"\Asample-[1-9][0-9]*\.jpg\Z")
 
 
 def _subtitle_path(config: AppConfig, video: Video) -> Path:
@@ -74,6 +88,140 @@ def _ensure_no_subtitle_job(session: Session, video_id: str) -> None:
     ensure_no_active_job(session, video_id, "translate")
 
 
+def _video_dir(config: AppConfig, video: Video) -> Path:
+    return (config.videos_dir / video.id).resolve()
+
+
+def _cover_read(region: CoverRegion | None) -> CoverRegionRead | None:
+    return CoverRegionRead.model_validate(region) if region is not None else None
+
+
+@router.post(
+    "/videos/{video_id}/sample-frames", response_model=SampleFramesRead
+)
+def create_sample_frames(
+    video_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> SampleFramesRead:
+    """Capture a few frames and return the saved cover-region selection."""
+    config: AppConfig = get_config(request)
+    video = get_video(session, video_id)
+    _ensure_ready(video)
+    video_dir = _video_dir(config, video)
+    source = safe_source(video_dir, video.file_path)
+
+    duration = float(video.duration_sec)
+    if duration <= 0:
+        try:
+            duration = float(probe_video(source)["duration_sec"])
+        except FFmpegError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Không đọc được video: {exc}"
+            ) from exc
+    try:
+        frames = extract_sample_frames(
+            source, video_dir / "frames", duration_sec=duration
+        )
+    except FFmpegError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Không chụp được ảnh mẫu: {exc}"
+        ) from exc
+    try:
+        region = load_cover_region(video_dir)
+    except CoverRegionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return SampleFramesRead(
+        frames=[
+            SampleFrameRead(
+                time=round(at_sec, 3),
+                url=f"/api/videos/{video.id}/frames/{path.name}",
+            )
+            for at_sec, path in frames
+        ],
+        region=_cover_read(region),
+    )
+
+
+@router.get("/videos/{video_id}/frames/{name}")
+def get_sample_frame(
+    video_id: str,
+    name: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> FileResponse:
+    config: AppConfig = get_config(request)
+    video = get_video(session, video_id)
+    if not SAMPLE_FRAME_NAME.fullmatch(name):
+        raise HTTPException(status_code=404, detail="Ảnh mẫu không tồn tại")
+    video_dir = _video_dir(config, video)
+    path = (video_dir / "frames" / name).resolve()
+    if not path.is_relative_to(video_dir) or not path.is_file():
+        raise HTTPException(status_code=404, detail="Ảnh mẫu không tồn tại")
+    return FileResponse(
+        path, media_type="image/jpeg", headers={"Cache-Control": "no-store"}
+    )
+
+
+@router.get(
+    "/videos/{video_id}/cover-region", response_model=CoverRegionRead | None
+)
+def get_cover_region(
+    video_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> CoverRegionRead | None:
+    config: AppConfig = get_config(request)
+    video = get_video(session, video_id)
+    try:
+        region = load_cover_region(_video_dir(config, video))
+    except CoverRegionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _cover_read(region)
+
+
+@router.put("/videos/{video_id}/cover-region", response_model=CoverRegionRead)
+def update_cover_region(
+    video_id: str,
+    payload: CoverRegionPayload,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> CoverRegionRead:
+    config: AppConfig = get_config(request)
+    video = get_video(session, video_id)
+    region = CoverRegion(
+        x=payload.x,
+        y=payload.y,
+        width=payload.width,
+        height=payload.height,
+    )
+    try:
+        save_cover_region(_video_dir(config, video), region)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Không lưu được vùng che: {exc}"
+        ) from exc
+    return CoverRegionRead.model_validate(region)
+
+
+@router.delete("/videos/{video_id}/cover-region", status_code=204)
+def delete_cover_region(
+    video_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> Response:
+    config: AppConfig = get_config(request)
+    video = get_video(session, video_id)
+    try:
+        save_cover_region(_video_dir(config, video), None)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Không xoá được vùng che: {exc}"
+        ) from exc
+    return Response(status_code=204)
+
+
 @router.post(
     "/videos/{video_id}/transcribe", response_model=JobRead, status_code=202
 )
@@ -97,7 +245,11 @@ def start_transcribe(
         params={
             "translate": bool(payload.translate) if payload else False,
             "model": settings.whisper_model,
-            "target_language": settings.target_language,
+            "source_language": payload.source_language if payload else None,
+            "target_language": (
+                payload.target_language if payload and payload.target_language else None
+            )
+            or settings.target_language,
         },
     )
     session.add(job)

@@ -1,10 +1,19 @@
-import type { SubtitleData, SubtitleSegment } from "../api";
-import { CheckIcon, SpinnerIcon, TrashIcon, XIcon } from "./Icons";
+import type { CoverRegion, SubtitleData, SubtitleSegment } from "../api";
+import { languageLabel } from "../lib/languages";
+import {
+  CheckIcon,
+  FilmIcon,
+  RefreshIcon,
+  SpinnerIcon,
+  TrashIcon,
+  XIcon,
+} from "./Icons";
 
 interface SubtitleEditorProps {
   data: SubtitleData | null;
   draft: SubtitleSegment[];
   targetLanguage: string;
+  coverRegion: CoverRegion | null;
   loading: boolean;
   busy: boolean;
   saving: boolean;
@@ -15,8 +24,9 @@ interface SubtitleEditorProps {
   onAdd: () => void;
   onDelete: (index: number) => void;
   onSave: () => void;
-  onTranscribe: (translate: boolean) => void;
-  onTranslate: () => void;
+  onOpenTranscribe: (translate: boolean) => void;
+  onOpenTranslate: () => void;
+  onOpenRegion: () => void;
 }
 
 const INPUT_CLASS =
@@ -26,6 +36,7 @@ export function SubtitleEditor({
   data,
   draft,
   targetLanguage,
+  coverRegion,
   loading,
   busy,
   saving,
@@ -36,8 +47,9 @@ export function SubtitleEditor({
   onAdd,
   onDelete,
   onSave,
-  onTranscribe,
-  onTranslate,
+  onOpenTranscribe,
+  onOpenTranslate,
+  onOpenRegion,
 }: SubtitleEditorProps) {
   const locked = disabled || busy || saving;
 
@@ -71,6 +83,16 @@ export function SubtitleEditor({
                 )}
                 {data.translated ? "Đã dịch" : "Bản gốc"}
               </span>
+              <span
+                className={`ml-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9.5px] font-medium ${
+                  coverRegion
+                    ? "bg-acid/10 text-acid"
+                    : "bg-zinc-500/10 text-zinc-500"
+                }`}
+              >
+                <FilmIcon className="size-2.5" />
+                {coverRegion ? "Đang che phụ đề cũ" : "Chưa che phụ đề cũ"}
+              </span>
             </div>
           ) : (
             <p className="mt-1 text-[12px] text-zinc-500">
@@ -86,7 +108,7 @@ export function SubtitleEditor({
             <>
               <button
                 type="button"
-                onClick={() => onTranscribe(false)}
+                onClick={() => onOpenTranscribe(false)}
                 disabled={locked}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface/70 px-3 py-1.5 text-[11.5px] font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -97,7 +119,7 @@ export function SubtitleEditor({
               </button>
               <button
                 type="button"
-                onClick={() => onTranscribe(true)}
+                onClick={() => onOpenTranscribe(true)}
                 disabled={locked}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-acid px-3 py-1.5 text-[11.5px] font-semibold text-ink transition hover:bg-acid-soft disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -111,7 +133,17 @@ export function SubtitleEditor({
             <>
               <button
                 type="button"
-                onClick={onTranslate}
+                onClick={() => onOpenTranscribe(false)}
+                disabled={locked}
+                title="Nhận dạng lại lời nói và thay toàn bộ phụ đề hiện tại"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface/70 px-3 py-1.5 text-[11.5px] font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <RefreshIcon className="size-3.5" />
+                Tạo lại phụ đề
+              </button>
+              <button
+                type="button"
+                onClick={onOpenTranslate}
                 disabled={locked || dirty}
                 title={
                   dirty ? "Lưu thay đổi trước khi dịch lại" : undefined
@@ -121,7 +153,17 @@ export function SubtitleEditor({
                 {busy ? (
                   <SpinnerIcon className="size-3.5 animate-spin" />
                 ) : null}
-                Dịch sang {targetLanguage.toUpperCase()}
+                Dịch sang {languageLabel(targetLanguage)}
+              </button>
+              <button
+                type="button"
+                onClick={onOpenRegion}
+                disabled={locked}
+                title="Chụp ảnh mẫu và chỉnh vùng che phụ đề cũ"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[11.5px] text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <FilmIcon className="size-3.5" />
+                Vùng che
               </button>
               <button
                 type="button"
@@ -223,7 +265,10 @@ export function SubtitleEditor({
           )}
           <p className="mt-3 text-[10.5px] leading-relaxed text-zinc-600">
             Mốc thời gian tính bằng giây. Lưu để cập nhật file SRT dùng khi
-            render.
+            render.{" "}
+            {coverRegion
+              ? "Khi render phụ đề, vùng che đã chọn sẽ được phủ kín trước khi vẽ phụ đề mới."
+              : "Chưa chọn vùng che nên phụ đề cũ (nếu có) vẫn hiện phía sau phụ đề mới."}
           </p>
         </>
       )}

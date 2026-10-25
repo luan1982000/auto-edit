@@ -1,6 +1,7 @@
 # Phase 6 — Render gộp + hoàn thiện
 
 - **Commit code:** `c0805cf` (base `41955d1`)
+- **Commit tài liệu:** `1e9e2e9`
 - **Trạng thái:** ✅ hoàn tất, đã kiểm chứng
 - **Tài liệu phase trước:** [phase-5.md](phase-5.md)
 

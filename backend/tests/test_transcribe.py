@@ -140,6 +140,42 @@ def test_transcribe_wraps_model_errors(
         )
 
 
+def test_transcribe_forces_the_selected_source_language(
+    audio_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = FakeModel([_segment(0.0, 1.0, "xin chào")])
+    transcriber = FasterWhisperTranscriber()
+    monkeypatch.setattr(transcriber, "_build_model", lambda name: model)
+
+    transcriber.transcribe(
+        audio_file,
+        model_name="small",
+        duration_sec=1.0,
+        on_progress=lambda percent, message: None,
+        language="vi",
+    )
+
+    assert model.kwargs["language"] == "vi"
+
+
+def test_transcribe_omits_language_when_auto_detection_is_selected(
+    audio_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = FakeModel([_segment(0.0, 1.0, "hello")])
+    transcriber = FasterWhisperTranscriber()
+    monkeypatch.setattr(transcriber, "_build_model", lambda name: model)
+
+    transcriber.transcribe(
+        audio_file,
+        model_name="small",
+        duration_sec=1.0,
+        on_progress=lambda percent, message: None,
+        language=None,
+    )
+
+    assert "language" not in model.kwargs
+
+
 def test_transcribe_tolerates_missing_language_info(
     audio_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

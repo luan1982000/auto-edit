@@ -5,6 +5,7 @@ import {
   api,
   type AppSettings,
   type AudioMode,
+  type CoverRegion,
   type Job,
   type RenderOptions,
   type SubtitleData,
@@ -13,6 +14,11 @@ import {
 } from "../api";
 import { JobCard } from "../components/JobCard";
 import { SubtitleEditor } from "../components/SubtitleEditor";
+import {
+  SubtitleSetupDialog,
+  type SubtitleDialogMode,
+  type SubtitleDialogPayload,
+} from "../components/SubtitleSetupDialog";
 import { VoicePanel } from "../components/VoicePanel";
 import {
   AlertIcon,
@@ -23,6 +29,7 @@ import {
   FolderIcon,
   SpinnerIcon,
   TrashIcon,
+  UploadIcon,
   XIcon,
 } from "../components/Icons";
 import { StatusDot } from "../components/VideoCard";
@@ -134,14 +141,23 @@ export function VideoDetail() {
   const [subtitleLoading, setSubtitleLoading] = useState(false);
   const [subtitleSaving, setSubtitleSaving] = useState(false);
   const [subtitleError, setSubtitleError] = useState("");
+  const [targetLanguage, setTargetLanguage] = useState("vi");
+  const [coverRegion, setCoverRegion] = useState<CoverRegion | null>(null);
+  const [dialogMode, setDialogMode] = useState<SubtitleDialogMode | null>(
+    null,
+  );
+  const [dialogTranslate, setDialogTranslate] = useState(false);
+  const [dialogSubmitting, setDialogSubmitting] = useState(false);
+  const [dialogError, setDialogError] = useState("");
   const [ttsVoice, setTtsVoice] = useState("vi-VN-HoaiMyNeural");
   const [ttsRate, setTtsRate] = useState("+0%");
   const [previewing, setPreviewing] = useState(false);
   const [voiceError, setVoiceError] = useState("");
   const subtitleDirtyRef = useRef(false);
-  const outputState = useRef({ id: "", has: false });
+  const outputState = useRef({ id: "", version: 0, has: false });
   const previousHasVoice = useRef<boolean | null>(null);
   const voiceTouched = useRef(false);
+  const targetTouched = useRef(false);
   const previewAudio = useRef<{ audio: HTMLAudioElement; url: string } | null>(
     null,
   );
@@ -200,6 +216,27 @@ export function VideoDetail() {
   }, [settings]);
 
   useEffect(() => {
+    if (!settings || targetTouched.current) return;
+    setTargetLanguage(settings.target_language);
+  }, [settings]);
+
+  useEffect(() => {
+    if (!id) return;
+    let alive = true;
+    api
+      .coverRegion(id)
+      .then((region) => {
+        if (alive) setCoverRegion(region);
+      })
+      .catch(() => {
+        if (alive) setCoverRegion(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [id, video?.status]);
+
+  useEffect(() => {
     if (!video) return;
     if (previousHasVoice.current === false && video.has_voice) {
       setOptionsTouched(true);
@@ -232,12 +269,16 @@ export function VideoDetail() {
     if (
       previous.id === video.id &&
       video.has_output &&
-      !previous.has
+      video.output_version !== previous.version
     ) {
-      setOutputVersion(Date.now());
+      setOutputVersion(video.output_version || Date.now());
       setVariant("output");
     }
-    outputState.current = { id: video.id, has: video.has_output };
+    outputState.current = {
+      id: video.id,
+      version: video.output_version,
+      has: video.has_output,
+    };
   }, [video]);
 
   const hasSubtitle = video?.has_subtitle ?? false;
@@ -373,41 +414,98 @@ export function VideoDetail() {
     }
   }
 
-  async function handleTranscribe(translate: boolean) {
+  function openTranscribeDialog(translate: boolean) {
     if (!video) return;
-    if (
+    if (subtitle) {
+      const message = subtitleDirtyRef.current
+        ? "Tạo lại phụ đề sẽ bỏ các thay đổi chưa lưu và thay toàn bộ phụ đề hiện tại. Tiếp tục?"
+        : "Tạo lại phụ đề sẽ thay toàn bộ phụ đề hiện tại. Tiếp tục?";
+      if (!window.confirm(message)) return;
+    } else if (
       subtitleDirtyRef.current &&
       !window.confirm("Bỏ các thay đổi phụ đề chưa lưu?")
     ) {
       return;
     }
     setSubtitleError("");
-    try {
-      const job = await api.transcribe(video.id, translate);
-      subtitleDirtyRef.current = false;
-      setSubtitleDirty(false);
-      trackJob(job);
-    } catch (error) {
-      setSubtitleError(
-        error instanceof Error ? error.message : "Không bắt đầu được job",
-      );
-    }
+    setDialogError("");
+    setDialogTranslate(translate);
+    setDialogMode("transcribe");
   }
 
-  async function handleTranslate() {
+  function openTranslateDialog() {
     if (!video) return;
     if (subtitleDirtyRef.current) {
       setSubtitleError("Lưu thay đổi phụ đề trước khi dịch lại");
       return;
     }
     setSubtitleError("");
+    setDialogError("");
+    setDialogMode("translate");
+  }
+
+  function openRegionDialog() {
+    if (!video) return;
+    setSubtitleError("");
+    setDialogError("");
+    setDialogMode("region");
+  }
+
+  function closeSubtitleDialog() {
+    if (dialogSubmitting) return;
+    setDialogMode(null);
+    setDialogError("");
+  }
+
+  async function handleSubtitleDialogSubmit(payload: SubtitleDialogPayload) {
+    if (!video) return;
+    setDialogSubmitting(true);
+    setDialogError("");
     try {
-      const job = await api.translate(video.id, settings?.target_language);
+      if (payload.mode !== "translate") {
+        if (payload.region) {
+          const saved = await api.saveCoverRegion(video.id, payload.region);
+          setCoverRegion(saved);
+        } else if (coverRegion) {
+          await api.deleteCoverRegion(video.id);
+          setCoverRegion(null);
+        }
+      }
+
+      if (payload.mode === "region") {
+        setDialogMode(null);
+        return;
+      }
+
+      if (payload.mode === "translate") {
+        const target = payload.targetLanguage ?? targetLanguage;
+        const job = await api.translate(video.id, target);
+        targetTouched.current = true;
+        setTargetLanguage(target);
+        trackJob(job);
+        setDialogMode(null);
+        return;
+      }
+
+      const job = await api.transcribe(video.id, {
+        translate: payload.translate,
+        sourceLanguage: payload.sourceLanguage,
+        targetLanguage: payload.translate ? payload.targetLanguage : null,
+      });
+      if (payload.translate && payload.targetLanguage) {
+        targetTouched.current = true;
+        setTargetLanguage(payload.targetLanguage);
+      }
+      subtitleDirtyRef.current = false;
+      setSubtitleDirty(false);
       trackJob(job);
+      setDialogMode(null);
     } catch (error) {
-      setSubtitleError(
-        error instanceof Error ? error.message : "Không bắt đầu được job dịch",
+      setDialogError(
+        error instanceof Error ? error.message : "Không bắt đầu được job",
       );
+    } finally {
+      setDialogSubmitting(false);
     }
   }
 
@@ -704,7 +802,8 @@ export function VideoDetail() {
           <SubtitleEditor
             data={subtitle}
             draft={subtitleDraft}
-            targetLanguage={settings?.target_language ?? "vi"}
+            targetLanguage={targetLanguage}
+            coverRegion={coverRegion}
             loading={subtitleLoading}
             busy={subtitleBusy}
             saving={subtitleSaving}
@@ -715,8 +814,9 @@ export function VideoDetail() {
             onAdd={addSubtitleRow}
             onDelete={deleteSubtitleRow}
             onSave={() => void handleSaveSubtitle()}
-            onTranscribe={(translate) => void handleTranscribe(translate)}
-            onTranslate={() => void handleTranslate()}
+            onOpenTranscribe={openTranscribeDialog}
+            onOpenTranslate={openTranslateDialog}
+            onOpenRegion={openRegionDialog}
           />
 
           <VoicePanel
@@ -753,15 +853,22 @@ export function VideoDetail() {
               {video.title || "Chưa có tiêu đề"}
             </h1>
 
-            <a
-              href={video.source_url}
-              target="_blank"
-              rel="noreferrer"
-              className="mt-1.5 inline-flex max-w-full items-center gap-1.5 text-[11.5px] text-zinc-500 transition hover:text-acid"
-            >
-              <ExternalLinkIcon className="size-3 shrink-0" />
-              <span className="truncate">Link gốc</span>
-            </a>
+            {video.source_url ? (
+              <a
+                href={video.source_url}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-1.5 inline-flex max-w-full items-center gap-1.5 text-[11.5px] text-zinc-500 transition hover:text-acid"
+              >
+                <ExternalLinkIcon className="size-3 shrink-0" />
+                <span className="truncate">Link gốc</span>
+              </a>
+            ) : (
+              <span className="mt-1.5 inline-flex items-center gap-1.5 text-[11.5px] text-zinc-500">
+                <UploadIcon className="size-3 shrink-0" />
+                Video tải lên từ máy
+              </span>
+            )}
 
             <dl className="mt-4 grid grid-cols-2 gap-3 border-t border-line/70 pt-4 text-[12px]">
               <div>
@@ -780,9 +887,9 @@ export function VideoDetail() {
                 <dt className="text-zinc-600">Nguồn</dt>
                 <dd
                   className="mt-0.5 truncate text-zinc-200"
-                  title={video.source_url}
+                  title={video.source_url || "Video tải lên từ máy"}
                 >
-                  {video.source_url}
+                  {video.source_url || "Tải lên từ máy"}
                 </dd>
               </div>
             </dl>
@@ -915,6 +1022,22 @@ export function VideoDetail() {
           </div>
         </aside>
       </div>
+
+      {dialogMode && (
+        <SubtitleSetupDialog
+          key={dialogMode}
+          mode={dialogMode}
+          videoId={video.id}
+          initialTranslate={dialogTranslate}
+          initialSourceLanguage={subtitle?.language || null}
+          initialTargetLanguage={targetLanguage}
+          initialRegion={coverRegion}
+          submitting={dialogSubmitting}
+          error={dialogError}
+          onClose={closeSubtitleDialog}
+          onSubmit={(payload) => void handleSubtitleDialogSubmit(payload)}
+        />
+      )}
     </div>
   );
 }
