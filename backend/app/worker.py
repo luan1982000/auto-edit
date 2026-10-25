@@ -7,6 +7,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Event, Thread
 
 from sqlalchemy.orm import sessionmaker
@@ -14,10 +15,17 @@ from sqlmodel import Session, select
 
 from app.config import AppConfig
 from app.models import Job, Video, utcnow
+from app.services.assets import resolve_logo
 from app.services.douyin import normalize_douyin_url, with_douyin_hint
 from app.services.downloader import DownloadError, DownloadResult, download_video
 from app.services.fallback import FallbackError, download_via_fallback
-from app.services.ffmpeg_utils import FFmpegError, make_thumbnail, probe_video
+from app.services.ffmpeg_utils import (
+    FFmpegError,
+    make_thumbnail,
+    probe_video,
+    run_ffmpeg_with_progress,
+)
+from app.services.render import LogoOptions, RenderOptions, build_ffmpeg_command
 from app.services.urls import detect_platform
 from app.settings_store import get_or_create_settings
 
@@ -156,7 +164,9 @@ class Worker:
                 stored.status = "failed"
                 stored.error = (error or "Unknown error")[:2000]
                 stored.message = "Thất bại"
-                if job.video_id:
+                # Only a failed download makes the video unusable. A failed
+                # transcribe/translate/tts/render leaves the ready video intact.
+                if job.video_id and job.type == "download":
                     video = session.get(Video, job.video_id)
                     if video is not None:
                         video.status = "failed"
@@ -294,5 +304,92 @@ def build_download_handler(config: AppConfig, session_factory: SessionFactory) -
     return handle
 
 
+class RenderError(RuntimeError):
+    """Raised when a render cannot start or ffmpeg fails."""
+
+
+def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> JobHandler:
+    def handle(ctx: JobContext) -> None:
+        if not ctx.video_id:
+            raise RenderError("Job render thiếu video_id")
+
+        video_dir = (config.videos_dir / ctx.video_id).resolve()
+        with session_factory() as session:
+            video = session.get(Video, ctx.video_id)
+            if video is None:
+                raise RenderError("Video không tồn tại trong database")
+            settings = get_or_create_settings(session)
+            source = Path(video.file_path).resolve()
+            if not source.is_relative_to(video_dir) or not source.is_file():
+                raise RenderError("Chưa có file video gốc để render")
+            width = video.width
+            height = video.height
+            duration = video.duration_sec
+            logo_enabled = bool(ctx.params.get("logo", True))
+            logo_path = resolve_logo(config, settings.logo_path) if logo_enabled else None
+            logo_options = (
+                LogoOptions(
+                    path=logo_path,
+                    position=settings.logo_position,
+                    scale_pct=settings.logo_scale_pct,
+                    opacity=settings.logo_opacity,
+                    margin_px=settings.logo_margin_px,
+                )
+                if logo_path is not None
+                else None
+            )
+
+        if logo_enabled and logo_options is None:
+            raise RenderError("Chưa có logo hợp lệ — upload logo trong Cài đặt")
+        if logo_enabled and (width <= 0 or height <= 0):
+            raise RenderError("Chưa có kích thước video để đặt logo")
+
+        output = video_dir / "output_final.mp4"
+        temporary = video_dir / "output_final.tmp.mp4"
+        command = build_ffmpeg_command(
+            source,
+            temporary,
+            RenderOptions(
+                video_width=width,
+                video_height=height,
+                logo=logo_options,
+            ),
+        )
+
+        ctx.update(1, "Bắt đầu render...")
+        try:
+            run_ffmpeg_with_progress(
+                command,
+                duration_sec=duration,
+                on_progress=lambda percent: ctx.update(
+                    max(1, min(99, percent)), f"Đang render... {percent}%"
+                ),
+                timeout=max(300.0, duration * 10),
+                deadline_check=ctx.check_deadline,
+            )
+            temporary.replace(output)
+        except FFmpegError as exc:
+            temporary.unlink(missing_ok=True)
+            raise RenderError(f"Render thất bại: {exc}") from exc
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+
+        with session_factory() as session:
+            stored = session.get(Video, ctx.video_id)
+            if stored is None:
+                raise RenderError("Video bị xoá trong lúc render")
+            stored.has_output = True
+            session.add(stored)
+            session.commit()
+
+        ctx.update(100, "Hoàn tất")
+
+    return handle
+
+
 def default_handlers(config: AppConfig, session_factory: SessionFactory) -> dict[str, JobHandler]:
-    return {"download": build_download_handler(config, session_factory)}
+    return {
+        "download": build_download_handler(config, session_factory),
+        "render": build_render_handler(config, session_factory),
+    }

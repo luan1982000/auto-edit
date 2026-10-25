@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
   api,
@@ -11,6 +11,7 @@ import {
   CheckIcon,
   RefreshIcon,
   SpinnerIcon,
+  TrashIcon,
 } from "../components/Icons";
 
 const inputClass =
@@ -91,6 +92,10 @@ export function SettingsPage() {
   const [updateResult, setUpdateResult] =
     useState<UpdateYtdlpResponse | null>(null);
   const [updateError, setUpdateError] = useState("");
+  const [logoBusy, setLogoBusy] = useState(false);
+  const [logoError, setLogoError] = useState("");
+  const [logoVersion, setLogoVersion] = useState(0);
+  const logoInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let alive = true;
@@ -141,7 +146,9 @@ export function SettingsPage() {
     setStatus("saving");
     setError("");
     try {
-      const updated = await api.updateSettings(form);
+      const patch: Partial<AppSettings> = { ...form };
+      delete patch.logo_path;
+      const updated = await api.updateSettings(patch);
       setSaved(updated);
       setForm(updated);
       setStatus("saved");
@@ -168,8 +175,53 @@ export function SettingsPage() {
     }
   }
 
+  async function uploadLogo(file: File) {
+    setLogoBusy(true);
+    setLogoError("");
+    try {
+      const updated = await api.uploadLogo(file);
+      setSaved(updated);
+      setForm(updated);
+      setLogoVersion(Date.now());
+      setStatus("idle");
+    } catch (reason) {
+      setLogoError(
+        reason instanceof Error ? reason.message : "Upload logo thất bại",
+      );
+    } finally {
+      setLogoBusy(false);
+    }
+  }
+
+  async function removeLogo() {
+    setLogoBusy(true);
+    setLogoError("");
+    try {
+      const updated = await api.deleteLogo();
+      setSaved(updated);
+      setForm(updated);
+      setLogoVersion(Date.now());
+      setStatus("idle");
+    } catch (reason) {
+      setLogoError(
+        reason instanceof Error ? reason.message : "Xoá logo thất bại",
+      );
+    } finally {
+      setLogoBusy(false);
+    }
+  }
+
   const dirty =
     saved !== null && form !== null && JSON.stringify(saved) !== JSON.stringify(form);
+
+  const logoCorner =
+    form?.logo_position === "tl"
+      ? { top: form.logo_margin_px, left: form.logo_margin_px }
+      : form?.logo_position === "tr"
+        ? { top: form.logo_margin_px, right: form.logo_margin_px }
+        : form?.logo_position === "bl"
+          ? { bottom: form.logo_margin_px, left: form.logo_margin_px }
+          : { bottom: form?.logo_margin_px ?? 0, right: form?.logo_margin_px ?? 0 };
 
   if (!form) {
     return error ? (
@@ -393,6 +445,82 @@ export function SettingsPage() {
       </SettingsSection>
 
       <SettingsSection title="Logo" description="Góc, kích thước, độ mờ">
+        <div className="rounded-xl border border-line/70 bg-ink/30 p-4 sm:col-span-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[12.5px] font-medium text-zinc-300">Xem trước</p>
+            <p className="text-[11px] text-zinc-600">
+              Mô phỏng vị trí trên khung hình 16:9
+            </p>
+          </div>
+          <div className="relative mt-3 aspect-video overflow-hidden rounded-xl border border-line/60 bg-[radial-gradient(circle_at_30%_20%,rgba(215,254,79,0.16),transparent_55%),linear-gradient(135deg,#1c2024,#0c0f11)]">
+            <div
+              aria-hidden
+              className="absolute inset-x-6 bottom-6 h-px bg-white/10"
+            />
+            {form.logo_path ? (
+              <img
+                key={logoVersion}
+                src={api.logoUrl(logoVersion)}
+                alt="Logo xem trước"
+                style={{
+                  ...logoCorner,
+                  width: `${form.logo_scale_pct}%`,
+                  opacity: form.logo_opacity,
+                }}
+                className="absolute max-h-[70%] object-contain"
+              />
+            ) : (
+              <p className="absolute inset-0 grid place-items-center text-[12px] text-zinc-600">
+                Chưa có logo — upload để xem trước
+              </p>
+            )}
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <input
+              ref={logoInput}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (file) void uploadLogo(file);
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => logoInput.current?.click()}
+              disabled={logoBusy}
+              className="inline-flex items-center gap-2 rounded-xl border border-line bg-panel px-3.5 py-2 text-[12px] font-medium text-zinc-200 transition hover:border-acid/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {logoBusy ? (
+                <SpinnerIcon className="size-3.5 animate-spin text-acid" />
+              ) : null}
+              {logoBusy ? "Đang xử lý..." : form.logo_path ? "Đổi logo" : "Upload logo"}
+            </button>
+            {form.logo_path && (
+              <button
+                type="button"
+                onClick={() => void removeLogo()}
+                disabled={logoBusy}
+                className="inline-flex items-center gap-2 rounded-xl border border-rose-500/20 bg-rose-500/[0.06] px-3.5 py-2 text-[12px] font-medium text-rose-300 transition hover:border-rose-500/40 disabled:opacity-50"
+              >
+                <TrashIcon className="size-3.5" />
+                Xoá logo
+              </button>
+            )}
+            <span className="text-[11px] text-zinc-600">
+              PNG/JPEG/WEBP, tối đa 5 MB. PNG nền trong suốt được khuyến nghị.
+            </span>
+          </div>
+          {logoError && (
+            <p className="mt-2 rounded-lg border border-rose-500/20 bg-rose-500/[0.06] px-3 py-2 text-[11.5px] text-rose-200">
+              {logoError}
+            </p>
+          )}
+        </div>
+
         <Field label="Vị trí">
           <select
             className={inputClass}
@@ -450,9 +578,10 @@ export function SettingsPage() {
       </SettingsSection>
 
       <div className="rounded-2xl border border-line/70 bg-surface/40 p-5 text-[12px] leading-relaxed text-zinc-500">
-        <span className="font-medium text-zinc-300">Ghi chú:</span> Phase 2 dùng
-        phần tải xuống, cookies và cập nhật yt-dlp. Cấu hình phụ đề, giọng đọc
-        và logo đã được lưu sẵn cho các phase sau.
+        <span className="font-medium text-zinc-300">Ghi chú:</span> Logo được
+        lưu trong <code className="text-zinc-400">data/assets/</code>. Video gốc
+        không bao giờ bị ghi đè; mỗi lần render tạo một bản{" "}
+        <code className="text-zinc-400">output_final.mp4</code> riêng.
       </div>
     </div>
   );

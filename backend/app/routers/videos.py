@@ -16,21 +16,12 @@ from app.config import AppConfig
 from app.db import get_session
 from app.ids import new_id
 from app.models import Job, Video
+from app.routers.common import get_config as _config
+from app.routers.common import get_video as _get_video
 from app.schemas import DownloadRequest, DownloadResponse, DuplicateInfo, VideoRead
 from app.services.urls import detect_platform
 
 router = APIRouter(prefix="/api", tags=["videos"])
-
-
-def _config(request: Request) -> AppConfig:
-    return request.app.state.config
-
-
-def _get_video(session: Session, video_id: str) -> Video:
-    video = session.get(Video, video_id)
-    if video is None:
-        raise HTTPException(status_code=404, detail="Video không tồn tại")
-    return video
 
 
 def _safe_video_path(video: Video, config: AppConfig, path: Path) -> Path:

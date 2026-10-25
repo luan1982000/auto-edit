@@ -41,7 +41,7 @@ def create_video(client: TestClient) -> Callable[..., Video]:
             dir_path=str(video_dir),
             file_path=str(video_dir / "original.mp4"),
             thumb_path=str(video_dir / "thumb.jpg"),
-            status="ready",
+            status=overrides.pop("status", "ready"),
             **overrides,
         )
         with client.app.state.session_factory() as session:

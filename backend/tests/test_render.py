@@ -1,0 +1,135 @@
+from pathlib import Path
+
+import pytest
+
+from app.services.render import LogoOptions, RenderOptions, build_ffmpeg_command
+
+
+def _option(cmd: list[str], name: str) -> str:
+    return cmd[cmd.index(name) + 1]
+
+
+def test_build_command_without_logo_reencodes_video_and_copies_audio(tmp_path: Path) -> None:
+    source = tmp_path / "original.mp4"
+    output = tmp_path / "output_final.mp4"
+
+    cmd = build_ffmpeg_command(source, output, RenderOptions(video_width=1920, video_height=1080))
+
+    assert cmd[0] == "ffmpeg"
+    assert "-filter_complex" not in cmd
+    assert _option(cmd, "-map") == "0:v:0"
+    assert "0:a?" in cmd
+    assert _option(cmd, "-c:v") == "libx264"
+    assert _option(cmd, "-crf") == "20"
+    assert _option(cmd, "-preset") == "medium"
+    assert _option(cmd, "-c:a") == "copy"
+    assert _option(cmd, "-movflags") == "+faststart"
+    assert cmd[-1] == str(output)
+
+
+def test_build_command_scales_logo_by_video_width(tmp_path: Path) -> None:
+    source = tmp_path / "original.mp4"
+    logo = tmp_path / "logo with space.png"
+    output = tmp_path / "output_final.mp4"
+
+    cmd = build_ffmpeg_command(
+        source,
+        output,
+        RenderOptions(
+            video_width=1920,
+            video_height=1080,
+            logo=LogoOptions(path=logo, position="tr", scale_pct=15, opacity=1.0, margin_px=24),
+        ),
+    )
+
+    filters = _option(cmd, "-filter_complex")
+    assert f"-i {logo}" not in filters  # paths are separate argv entries, not shell text
+    assert str(logo) in cmd
+    assert "[1:v]scale=288:-2,format=rgba,colorchannelmixer=aa=1[logo]" in filters
+    assert "[0:v][logo]overlay=main_w-overlay_w-24:24[vout]" in filters
+    assert _option(cmd, "-map") == "[vout]"
+    assert "-filter_complex" in cmd
+
+
+@pytest.mark.parametrize(
+    ("position", "expression"),
+    [
+        ("tl", "24:24"),
+        ("tr", "main_w-overlay_w-24:24"),
+        ("bl", "24:main_h-overlay_h-24"),
+        ("br", "main_w-overlay_w-24:main_h-overlay_h-24"),
+    ],
+)
+def test_logo_positions_map_to_overlay_expressions(
+    tmp_path: Path, position: str, expression: str
+) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            logo=LogoOptions(path=tmp_path / "logo.png", position=position),
+        ),
+    )
+    assert f"overlay={expression}" in _option(cmd, "-filter_complex")
+
+
+def test_logo_opacity_is_applied(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            logo=LogoOptions(path=tmp_path / "logo.png", position="bl", opacity=0.35),
+        ),
+    )
+    assert "colorchannelmixer=aa=0.35" in _option(cmd, "-filter_complex")
+
+
+def test_logo_width_is_even_for_vertical_and_odd_percentages(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=300,
+            video_height=500,
+            logo=LogoOptions(path=tmp_path / "logo.png", scale_pct=11),
+        ),
+    )
+    # 300 * 11% = 33 -> rounded down to the nearest even value so yuv420p encoding works.
+    assert "scale=32:-2" in _option(cmd, "-filter_complex")
+
+
+def test_unknown_logo_position_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="position"):
+        build_ffmpeg_command(
+            tmp_path / "in.mp4",
+            tmp_path / "out.mp4",
+            RenderOptions(
+                video_width=100,
+                video_height=100,
+                logo=LogoOptions(path=tmp_path / "logo.png", position="middle"),
+            ),
+        )
+
+
+def test_builder_refuses_to_overwrite_the_input(tmp_path: Path) -> None:
+    source = tmp_path / "original.mp4"
+    with pytest.raises(ValueError, match="original"):
+        build_ffmpeg_command(
+            source,
+            source,
+            RenderOptions(video_width=100, video_height=100),
+        )
+
+
+def test_command_requests_machine_readable_progress(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(video_width=100, video_height=100),
+    )
+    assert _option(cmd, "-progress") == "pipe:1"
+    assert "-nostats" in cmd

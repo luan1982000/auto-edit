@@ -13,12 +13,15 @@ router = APIRouter(prefix="/api", tags=["jobs"])
 @router.get("/jobs", response_model=list[JobRead])
 def list_jobs(
     status: str | None = Query(default=None),
+    video_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     session: Session = Depends(get_session),
 ) -> list[Job]:
     statement = select(Job)
     if status:
         statement = statement.where(Job.status == status)
+    if video_id:
+        statement = statement.where(Job.video_id == video_id)
     statement = statement.order_by(Job.created_at.desc()).limit(limit)
     return list(session.exec(statement).all())
 

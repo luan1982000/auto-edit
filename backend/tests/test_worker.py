@@ -356,3 +356,23 @@ def test_non_douyin_failure_does_not_use_fallback(
     error = _reload(session_factory, job.id).error or ""
     assert fallback_calls == []
     assert "Gợi ý" not in error
+
+
+def test_failure_of_post_download_job_keeps_video_ready(session_factory) -> None:
+    video, job = _make_download_job(session_factory, job_type="render")
+    with session_factory() as session:
+        stored_video = session.get(Video, video.id)
+        stored_video.status = "ready"
+        session.add(stored_video)
+        session.commit()
+
+    def handler(ctx: JobContext) -> None:
+        raise RuntimeError("ffmpeg exploded")
+
+    worker = Worker(session_factory, {"render": handler})
+    worker.run_once()
+
+    assert _reload(session_factory, job.id).status == "failed"
+    stored_video = _reload_video(session_factory, video.id)
+    assert stored_video.status == "ready"
+    assert stored_video.error is None

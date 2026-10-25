@@ -2,11 +2,102 @@
 
 import json
 import subprocess
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 
 class FFmpegError(RuntimeError):
     """Raised when an ffmpeg/ffprobe command fails or cannot be run."""
+
+
+def parse_progress_seconds(line: str) -> float | None:
+    """Parse one `-progress pipe:1` line into elapsed output seconds.
+
+    ffmpeg reports `out_time_ms` in microseconds (historical naming). Both
+    `out_time_us` and `out_time_ms` are accepted.
+    """
+    key, separator, raw_value = line.strip().partition("=")
+    if not separator:
+        return None
+    value = raw_value.strip()
+    if key in {"out_time_us", "out_time_ms"}:
+        try:
+            return max(0.0, int(value) / 1_000_000)
+        except ValueError:
+            return None
+    if key == "out_time":
+        try:
+            hours, minutes, seconds = value.split(":")
+            return max(0.0, int(hours) * 3600 + int(minutes) * 60 + float(seconds))
+        except ValueError:
+            return None
+    return None
+
+
+def run_ffmpeg_with_progress(
+    args: list[str],
+    duration_sec: float,
+    on_progress: Callable[[int], None],
+    timeout: float = 900,
+    deadline_check: Callable[[], None] | None = None,
+) -> None:
+    """Run ffmpeg and translate `-progress pipe:1` output into percentages."""
+    try:
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError as exc:
+        raise FFmpegError(f"{args[0]} not found in PATH") from exc
+
+    timed_out = False
+
+    def kill() -> None:
+        nonlocal timed_out
+        timed_out = True
+        process.kill()
+
+    timer = threading.Timer(timeout, kill)
+    timer.daemon = True
+    timer.start()
+
+    stderr_chunks: list[str] = []
+
+    def drain_stderr() -> None:
+        if process.stderr is not None:
+            stderr_chunks.append(process.stderr.read())
+
+    drain = threading.Thread(target=drain_stderr, daemon=True)
+    drain.start()
+
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            if deadline_check is not None:
+                deadline_check()
+            seconds = parse_progress_seconds(line)
+            if seconds is not None and duration_sec > 0:
+                percent = min(99, int(seconds / duration_sec * 100))
+                on_progress(percent)
+        process.wait()
+        drain.join(timeout=5)
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        timer.cancel()
+
+    if timed_out:
+        raise FFmpegError(f"{Path(args[0]).name} timed out after {timeout:g}s")
+    if process.returncode != 0:
+        tail = "\n".join("".join(stderr_chunks).strip().splitlines()[-8:])[:1000]
+        raise FFmpegError(f"{Path(args[0]).name} failed (exit {process.returncode}): {tail}")
+    on_progress(100)
 
 
 def _run(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:

@@ -83,3 +83,73 @@ def test_ensure_mp4_remuxes_other_container(sample_video: Path, tmp_path: Path) 
 
 def test_ensure_mp4_returns_input_when_already_mp4(sample_video: Path) -> None:
     assert ensure_mp4(sample_video, sample_video) == sample_video
+
+
+def test_parse_progress_seconds_handles_ffmpeg_keys() -> None:
+    from app.services.ffmpeg_utils import parse_progress_seconds
+
+    assert parse_progress_seconds("out_time_us=1500000") == pytest.approx(1.5)
+    assert parse_progress_seconds("out_time_ms=1500000") == pytest.approx(1.5)
+    assert parse_progress_seconds("out_time=00:00:02.250000") == pytest.approx(2.25)
+    assert parse_progress_seconds("progress=continue") is None
+    assert parse_progress_seconds("garbage") is None
+
+
+def test_run_ffmpeg_with_progress_reports_percentages(tmp_path: Path) -> None:
+    import sys
+
+    from app.services.ffmpeg_utils import run_ffmpeg_with_progress
+
+    script = (
+        "import sys\n"
+        "for line in ('out_time_us=500000', 'progress=continue', "
+        "'out_time_us=2000000', 'progress=end'):\n"
+        "    print(line, flush=True)\n"
+    )
+    seen: list[int] = []
+    run_ffmpeg_with_progress(
+        [sys.executable, "-u", "-c", script],
+        duration_sec=2.0,
+        on_progress=seen.append,
+    )
+    assert seen[0] == 25
+    assert seen[-1] == 100
+    assert seen == sorted(seen)
+
+
+def test_run_ffmpeg_with_progress_includes_stderr_on_failure() -> None:
+    import sys
+
+    from app.services.ffmpeg_utils import run_ffmpeg_with_progress
+
+    with pytest.raises(FFmpegError, match="boom"):
+        run_ffmpeg_with_progress(
+            [sys.executable, "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"],
+            duration_sec=1.0,
+            on_progress=lambda _pct: None,
+        )
+
+
+def test_run_ffmpeg_with_progress_reports_missing_binary() -> None:
+    from app.services.ffmpeg_utils import run_ffmpeg_with_progress
+
+    with pytest.raises(FFmpegError, match="not found"):
+        run_ffmpeg_with_progress(
+            ["definitely-not-ffmpeg"],
+            duration_sec=1.0,
+            on_progress=lambda _pct: None,
+        )
+
+
+def test_run_ffmpeg_with_progress_enforces_timeout() -> None:
+    import sys
+
+    from app.services.ffmpeg_utils import run_ffmpeg_with_progress
+
+    with pytest.raises(FFmpegError, match="timed out"):
+        run_ffmpeg_with_progress(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            duration_sec=1.0,
+            on_progress=lambda _pct: None,
+            timeout=0.5,
+        )

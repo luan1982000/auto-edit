@@ -84,7 +84,6 @@ class SettingsRead(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    logo_path: str | None = None
     logo_position: LogoPosition | None = None
     logo_scale_pct: int | None = Field(default=None, ge=1, le=100)
     logo_opacity: float | None = Field(default=None, ge=0, le=1)
@@ -98,3 +97,10 @@ class SettingsUpdate(BaseModel):
     target_language: str | None = None
     whisper_model: str | None = None
     cookies_browser: str | None = None
+
+
+class RenderRequest(BaseModel):
+    logo: bool = True
+    subtitle: bool = False
+    voice: bool = False
+    keep_original_audio: Literal["mute", "duck", "keep"] = "keep"

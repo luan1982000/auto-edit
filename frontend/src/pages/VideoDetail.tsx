@@ -1,11 +1,20 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { api, type Video } from "../api";
+import {
+  api,
+  type AppSettings,
+  type AudioMode,
+  type Job,
+  type RenderOptions,
+  type Video,
+} from "../api";
+import { JobCard } from "../components/JobCard";
 import {
   AlertIcon,
   ArrowLeftIcon,
   CheckIcon,
+  DownloadIcon,
   ExternalLinkIcon,
   FolderIcon,
   SpinnerIcon,
@@ -48,23 +57,102 @@ function VariantButton({
   );
 }
 
+function OptionToggle({
+  checked,
+  disabled,
+  onChange,
+  label,
+  hint,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+  hint?: string;
+}) {
+  return (
+    <label
+      className={`flex items-start gap-2.5 rounded-xl border border-line/70 bg-ink/30 px-3 py-2.5 ${
+        disabled ? "opacity-45" : "cursor-pointer"
+      }`}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        className="mt-0.5 size-3.5 accent-[var(--color-acid)]"
+      />
+      <span className="min-w-0">
+        <span className="block text-[12.5px] font-medium text-zinc-200">
+          {label}
+        </span>
+        {hint && (
+          <span className="mt-0.5 block text-[10.5px] leading-relaxed text-zinc-600">
+            {hint}
+          </span>
+        )}
+      </span>
+    </label>
+  );
+}
+
+const AUDIO_MODES: Array<{ value: AudioMode; label: string }> = [
+  { value: "duck", label: "Giảm âm gốc khi có giọng đọc" },
+  { value: "keep", label: "Giữ âm gốc" },
+  { value: "mute", label: "Tắt âm gốc" },
+];
+
 export function VideoDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [video, setVideo] = useState<Video | null>(null);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [jobs, setJobs] = useState<Job[]>([]);
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
+  const [renderError, setRenderError] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [variant, setVariant] = useState<"original" | "output">("original");
+  const [outputVersion, setOutputVersion] = useState(0);
+  const [options, setOptions] = useState<RenderOptions>({
+    logo: true,
+    subtitle: false,
+    voice: false,
+    keep_original_audio: "keep",
+  });
+  const [optionsTouched, setOptionsTouched] = useState(false);
+  const [startingRender, setStartingRender] = useState(false);
+  const [pendingRenderId, setPendingRenderId] = useState<string | null>(null);
+  const outputState = useRef({ id: "", has: false });
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .settings()
+      .then((value) => {
+        if (alive) setSettings(value);
+      })
+      .catch(() => {
+        // Render still works without logo; the backend reports missing files.
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!id) return;
     let alive = true;
     const load = async () => {
       try {
-        const next = await api.video(id);
+        const [nextVideo, nextJobs] = await Promise.all([
+          api.video(id),
+          api.jobs(undefined, id),
+        ]);
         if (alive) {
-          setVideo(next);
+          setVideo(nextVideo);
+          setJobs(nextJobs);
           setLoadError("");
         }
       } catch (error) {
@@ -78,12 +166,42 @@ export function VideoDetail() {
     void load();
     const timer = window.setInterval(() => {
       void load();
-    }, 3000);
+    }, 2000);
     return () => {
       alive = false;
       window.clearInterval(timer);
     };
   }, [id]);
+
+  useEffect(() => {
+    if (!video || !settings || optionsTouched) return;
+    setOptions((current) => ({
+      ...current,
+      logo: Boolean(settings.logo_path),
+      subtitle: video.has_subtitle,
+      voice: video.has_voice,
+      keep_original_audio: video.has_voice ? "duck" : current.keep_original_audio,
+    }));
+  }, [video, settings, optionsTouched]);
+
+  useEffect(() => {
+    if (!video) return;
+    const previous = outputState.current;
+    if (
+      previous.id === video.id &&
+      video.has_output &&
+      !previous.has
+    ) {
+      setOutputVersion(Date.now());
+      setVariant("output");
+    }
+    outputState.current = { id: video.id, has: video.has_output };
+  }, [video]);
+
+  function changeOptions(patch: Partial<RenderOptions>) {
+    setOptionsTouched(true);
+    setOptions((current) => ({ ...current, ...patch }));
+  }
 
   async function handleDelete() {
     if (!video) return;
@@ -111,6 +229,22 @@ export function VideoDetail() {
       setActionError(
         error instanceof Error ? error.message : "Không mở được thư mục",
       );
+    }
+  }
+
+  async function handleRender() {
+    if (!video) return;
+    setStartingRender(true);
+    setRenderError("");
+    try {
+      const job = await api.render(video.id, options);
+      setPendingRenderId(job.id);
+    } catch (error) {
+      setRenderError(
+        error instanceof Error ? error.message : "Không bắt đầu render được",
+      );
+    } finally {
+      setStartingRender(false);
     }
   }
 
@@ -146,6 +280,18 @@ export function VideoDetail() {
     { label: "Giọng đọc", done: video.has_voice },
     { label: "Bản final", done: video.has_output },
   ];
+  const activeJob =
+    jobs.find((job) => job.status === "pending" || job.status === "running") ??
+    null;
+  const pendingRender = pendingRenderId
+    ? jobs.find((job) => job.id === pendingRenderId) ?? null
+    : null;
+  const visibleJob =
+    activeJob ??
+    (pendingRender?.status === "failed" ? pendingRender : null);
+  const outputUrl = api.fileUrl(video.id, "output", outputVersion);
+  const renderDisabled =
+    startingRender || activeJob !== null || video.status !== "ready";
 
   return (
     <div className="space-y-6">
@@ -175,12 +321,12 @@ export function VideoDetail() {
           <div className="overflow-hidden rounded-2xl border border-line bg-black">
             {video.status === "ready" ? (
               <video
-                key={variant}
+                key={`${variant}-${outputVersion}`}
                 controls
                 playsInline
                 preload="metadata"
                 poster={api.thumbUrl(video.id)}
-                src={api.fileUrl(video.id, variant)}
+                src={variant === "output" ? outputUrl : api.fileUrl(video.id, "original")}
                 className="max-h-[68vh] w-full bg-black"
               />
             ) : video.status === "downloading" ? (
@@ -212,25 +358,53 @@ export function VideoDetail() {
             )}
           </div>
 
-          <div className="flex w-fit items-center gap-1 rounded-xl border border-line bg-panel/60 p-1">
-            <VariantButton
-              active={variant === "original"}
-              onClick={() => setVariant("original")}
-            >
-              Original
-            </VariantButton>
-            <VariantButton
-              active={variant === "output"}
-              disabled={!video.has_output}
-              onClick={() => setVariant("output")}
-            >
-              Bản final
-            </VariantButton>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex w-fit items-center gap-1 rounded-xl border border-line bg-panel/60 p-1">
+              <VariantButton
+                active={variant === "original"}
+                onClick={() => setVariant("original")}
+              >
+                Original
+              </VariantButton>
+              <VariantButton
+                active={variant === "output"}
+                disabled={!video.has_output}
+                onClick={() => setVariant("output")}
+              >
+                Bản final
+              </VariantButton>
+            </div>
+            {video.has_output && (
+              <a
+                href={outputUrl}
+                download={`${video.id}-final.mp4`}
+                className="inline-flex items-center gap-2 rounded-xl border border-line bg-surface/70 px-3 py-2 text-[12px] font-medium text-zinc-300 transition hover:border-acid/40 hover:text-white"
+              >
+                <DownloadIcon className="size-3.5" />
+                Tải bản final
+              </a>
+            )}
           </div>
+
+          {visibleJob && (
+            <JobCard
+              job={visibleJob}
+              onDismiss={
+                visibleJob.status === "failed"
+                  ? () => setPendingRenderId(null)
+                  : undefined
+              }
+            />
+          )}
 
           {actionError && (
             <p className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-300">
               {actionError}
+            </p>
+          )}
+          {renderError && (
+            <p className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-300">
+              {renderError}
             </p>
           )}
         </div>
@@ -273,7 +447,10 @@ export function VideoDetail() {
               </div>
               <div className="col-span-2">
                 <dt className="text-zinc-600">Nguồn</dt>
-                <dd className="mt-0.5 truncate text-zinc-200" title={video.source_url}>
+                <dd
+                  className="mt-0.5 truncate text-zinc-200"
+                  title={video.source_url}
+                >
                   {video.source_url}
                 </dd>
               </div>
@@ -308,15 +485,14 @@ export function VideoDetail() {
 
           <div className="rounded-2xl border border-line bg-surface/50 p-5">
             <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-600">
-              Bước tiếp theo
-            </p>
-            <p className="mt-2 text-[12px] leading-relaxed text-zinc-500">
-              Phụ đề, giọng đọc và render logo sẽ được bật ở các phase tiếp
-              theo. Video gốc luôn được giữ nguyên.
+              Render bản final
             </p>
             <ul className="mt-3 space-y-2 text-[12px]">
               {steps.map((step) => (
-                <li key={step.label} className="flex items-center gap-2 text-zinc-500">
+                <li
+                  key={step.label}
+                  className="flex items-center gap-2 text-zinc-500"
+                >
                   {step.done ? (
                     <CheckIcon className="size-3.5 text-emerald-400" />
                   ) : (
@@ -326,6 +502,85 @@ export function VideoDetail() {
                 </li>
               ))}
             </ul>
+
+            <div className="mt-4 space-y-2">
+              <OptionToggle
+                label="Logo"
+                hint={
+                  settings?.logo_path
+                    ? "Theo cấu hình trong Cài đặt"
+                    : "Chưa upload logo trong Cài đặt"
+                }
+                checked={options.logo}
+                disabled={!settings?.logo_path}
+                onChange={(checked) => changeOptions({ logo: checked })}
+              />
+              <OptionToggle
+                label="Phụ đề"
+                hint={
+                  video.has_subtitle
+                    ? "Burn phụ đề đã tạo"
+                    : "Tạo phụ đề trước khi render"
+                }
+                checked={options.subtitle}
+                disabled={!video.has_subtitle}
+                onChange={(checked) => changeOptions({ subtitle: checked })}
+              />
+              <OptionToggle
+                label="Giọng đọc"
+                hint={
+                  video.has_voice
+                    ? "Ghép voice.mp3 vào timeline"
+                    : "Tạo giọng đọc trước khi render"
+                }
+                checked={options.voice}
+                disabled={!video.has_voice}
+                onChange={(checked) => changeOptions({ voice: checked })}
+              />
+            </div>
+
+            <label className="mt-3 block">
+              <span className="mb-1 block text-[10.5px] uppercase tracking-[0.14em] text-zinc-600">
+                Âm thanh gốc
+              </span>
+              <select
+                value={options.keep_original_audio}
+                disabled={!options.voice}
+                onChange={(event) =>
+                  changeOptions({
+                    keep_original_audio: event.target.value as AudioMode,
+                  })
+                }
+                className="w-full rounded-xl border border-line bg-ink/60 px-3 py-2 text-[12px] text-zinc-200 outline-none transition disabled:opacity-45 focus:border-acid/50"
+              >
+                {AUDIO_MODES.map((mode) => (
+                  <option key={mode.value} value={mode.value}>
+                    {mode.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <button
+              type="button"
+              onClick={() => void handleRender()}
+              disabled={renderDisabled}
+              className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-acid px-4 py-2.5 text-[12.5px] font-semibold text-ink transition hover:bg-acid-soft disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {startingRender || activeJob?.type === "render" ? (
+                <SpinnerIcon className="size-4 animate-spin" />
+              ) : (
+                <DownloadIcon className="size-4 rotate-180" />
+              )}
+              {activeJob?.type === "render"
+                ? "Đang render..."
+                : startingRender
+                  ? "Đang bắt đầu..."
+                  : "Render bản final"}
+            </button>
+            <p className="mt-2 text-[10.5px] leading-relaxed text-zinc-600">
+              Một lệnh ffmpeg duy nhất. Bản gốc luôn được giữ nguyên.
+            </p>
           </div>
         </aside>
       </div>

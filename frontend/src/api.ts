@@ -44,7 +44,7 @@ export interface DownloadResponse {
 
 export interface AppSettings {
   logo_path: string;
-  logo_position: "tl" | "tr" | "bl" | "br";
+  logo_position: LogoPosition;
   logo_scale_pct: number;
   logo_opacity: number;
   logo_margin_px: number;
@@ -75,6 +75,16 @@ export interface UpdateYtdlpResponse {
   restart_required: boolean;
 }
 
+export type LogoPosition = "tl" | "tr" | "bl" | "br";
+export type AudioMode = "mute" | "duck" | "keep";
+
+export interface RenderOptions {
+  logo: boolean;
+  subtitle: boolean;
+  voice: boolean;
+  keep_original_audio: AudioMode;
+}
+
 async function readError(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json();
@@ -99,7 +109,7 @@ async function readError(response: Response): Promise<string> {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  if (init.body && !headers.has("Content-Type")) {
+  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   const response = await fetch(path, { ...init, headers });
@@ -129,8 +139,13 @@ export const api = {
       method: "POST",
     }),
 
-  jobs: (status?: JobStatus) =>
-    request<Job[]>(`/api/jobs${status ? `?status=${status}` : ""}`),
+  jobs: (status?: JobStatus, videoId?: string) => {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (videoId) params.set("video_id", videoId);
+    const query = params.toString();
+    return request<Job[]>(`/api/jobs${query ? `?${query}` : ""}`);
+  },
 
   settings: () => request<AppSettings>("/api/settings"),
   updateSettings: (patch: Partial<AppSettings>) =>
@@ -143,7 +158,23 @@ export const api = {
       method: "POST",
     }),
 
+  uploadLogo: (file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request<AppSettings>("/api/settings/logo", { method: "POST", body });
+  },
+  deleteLogo: () =>
+    request<AppSettings>("/api/settings/logo", { method: "DELETE" }),
+  logoUrl: (version?: number) =>
+    `/api/settings/logo${version ? `?v=${version}` : ""}`,
+
+  render: (id: string, options: RenderOptions) =>
+    request<Job>(`/api/videos/${id}/render`, {
+      method: "POST",
+      body: JSON.stringify(options),
+    }),
+
   thumbUrl: (id: string) => `/api/videos/${id}/thumb`,
-  fileUrl: (id: string, variant: "original" | "output") =>
-    `/api/videos/${id}/file?variant=${variant}`,
+  fileUrl: (id: string, variant: "original" | "output", version?: number) =>
+    `/api/videos/${id}/file?variant=${variant}${version ? `&v=${version}` : ""}`,
 };
