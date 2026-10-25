@@ -1,0 +1,247 @@
+"""Single background worker thread that executes jobs from the SQLite `jobs` table."""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from threading import Event, Thread
+
+from sqlalchemy.orm import sessionmaker
+from sqlmodel import Session, select
+
+from app.config import AppConfig
+from app.models import Job, Video, utcnow
+from app.services.downloader import DownloadError, download_video
+from app.services.ffmpeg_utils import FFmpegError, make_thumbnail, probe_video
+from app.settings_store import get_or_create_settings
+
+logger = logging.getLogger(__name__)
+
+SessionFactory = sessionmaker[Session]
+
+
+class JobTimeoutError(RuntimeError):
+    """Raised by handlers when a job exceeds its wall-clock budget."""
+
+
+@dataclass
+class JobContext:
+    job_id: str
+    video_id: str | None
+    params: dict
+    deadline: float
+    _update: Callable[[int, str], None]
+
+    def update(self, progress: int, message: str = "") -> None:
+        self._update(progress, message)
+
+    def check_deadline(self) -> None:
+        if time.monotonic() > self.deadline:
+            raise JobTimeoutError("Job timeout — vượt quá thời gian cho phép")
+
+
+JobHandler = Callable[[JobContext], None]
+
+
+class Worker:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        handlers: dict[str, JobHandler],
+        poll_interval: float = 0.5,
+        default_timeout_sec: int = 900,
+    ) -> None:
+        self._session_factory = session_factory
+        self._handlers = handlers
+        self._poll_interval = poll_interval
+        self._default_timeout_sec = default_timeout_sec
+        self._stop = Event()
+        self._thread: Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = Thread(target=self._loop, name="job-worker", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                processed = self.run_once()
+            except Exception:  # noqa: BLE001 - never let the worker thread die
+                logger.exception("Worker iteration crashed")
+                processed = False
+            if not processed:
+                self._stop.wait(self._poll_interval)
+
+    def run_once(self) -> bool:
+        """Claim and run at most one pending job. Returns False when queue is empty."""
+        job = self._claim_next()
+        if job is None:
+            return False
+
+        ctx = JobContext(
+            job_id=job.id,
+            video_id=job.video_id,
+            params=dict(job.params or {}),
+            deadline=time.monotonic() + self._timeout_for(job),
+            _update=self._make_updater(job.id),
+        )
+        try:
+            handler = self._handlers.get(job.type)
+            if handler is None:
+                raise RuntimeError(f"Unknown job type: {job.type}")
+            handler(ctx)
+        except Exception as exc:  # noqa: BLE001 - every failure is a job failure
+            logger.exception("Job %s (%s) failed", job.id, job.type)
+            self._finish(job, failed=True, error=str(exc).strip() or exc.__class__.__name__)
+        else:
+            self._finish(job, failed=False)
+        return True
+
+    def _timeout_for(self, job: Job) -> int:
+        try:
+            return int(job.params.get("timeout_sec", self._default_timeout_sec))
+        except (TypeError, ValueError):
+            return self._default_timeout_sec
+
+    def _claim_next(self) -> Job | None:
+        with self._session_factory() as session:
+            job = session.exec(
+                select(Job).where(Job.status == "pending").order_by(Job.created_at)
+            ).first()
+            if job is None:
+                return None
+            job.status = "running"
+            job.message = "Đang chạy"
+            session.add(job)
+            session.commit()
+            session.refresh(job)
+            return job
+
+    def _make_updater(self, job_id: str) -> Callable[[int, str], None]:
+        def update(progress: int, message: str = "") -> None:
+            with self._session_factory() as session:
+                job = session.get(Job, job_id)
+                if job is None:
+                    return
+                job.progress = max(0, min(100, int(progress)))
+                if message:
+                    job.message = message
+                session.add(job)
+                session.commit()
+
+        return update
+
+    def _finish(self, job: Job, failed: bool, error: str | None = None) -> None:
+        with self._session_factory() as session:
+            stored = session.get(Job, job.id)
+            if stored is None:
+                return
+            stored.finished_at = utcnow()
+            if failed:
+                stored.status = "failed"
+                stored.error = (error or "Unknown error")[:2000]
+                stored.message = "Thất bại"
+                if job.video_id:
+                    video = session.get(Video, job.video_id)
+                    if video is not None:
+                        video.status = "failed"
+                        video.error = stored.error
+                        session.add(video)
+            else:
+                stored.status = "done"
+                stored.progress = 100
+                stored.message = "Hoàn tất"
+                stored.error = None
+            session.add(stored)
+            session.commit()
+
+
+def build_download_handler(config: AppConfig, session_factory: SessionFactory) -> JobHandler:
+    def handle(ctx: JobContext) -> None:
+        if not ctx.video_id:
+            raise DownloadError("Job download thiếu video_id")
+        url = str(ctx.params.get("url") or "")
+        if not url:
+            raise DownloadError("Job download thiếu URL")
+
+        with session_factory() as session:
+            video = session.get(Video, ctx.video_id)
+            if video is None:
+                raise DownloadError("Video không tồn tại trong database")
+            cookies_browser = get_or_create_settings(session).cookies_browser
+
+        video_dir = config.videos_dir / ctx.video_id
+        ctx.update(0, "Bắt đầu tải...")
+        result = download_video(
+            url=url,
+            video_dir=video_dir,
+            progress_cb=ctx.update,
+            cookies_browser=cookies_browser,
+            deadline_check=ctx.check_deadline,
+        )
+
+        try:
+            probed = probe_video(result.file_path)
+        except FFmpegError as exc:
+            raise DownloadError(f"Không đọc được file video sau khi tải: {exc}") from exc
+
+        duration = float(probed["duration_sec"] or result.duration_sec)
+        thumb_path = video_dir / "thumb.jpg"
+        has_thumb = True
+        try:
+            make_thumbnail(
+                result.file_path, thumb_path, at_sec=min(1.0, max(duration / 2, 0.1))
+            )
+        except FFmpegError:
+            logger.warning("Could not create thumbnail for %s", result.file_path, exc_info=True)
+            has_thumb = False
+
+        meta = {
+            "url": url,
+            "title": result.title,
+            "duration_sec": duration,
+            "width": int(probed["width"]),
+            "height": int(probed["height"]),
+            "platform": result.platform,
+            "downloaded_at": utcnow().isoformat(),
+        }
+        (video_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        with session_factory() as session:
+            video = session.get(Video, ctx.video_id)
+            if video is None:
+                raise DownloadError("Video bị xoá trong lúc tải")
+            video.title = result.title or video.title or ctx.video_id
+            video.duration_sec = duration
+            video.width = int(probed["width"])
+            video.height = int(probed["height"])
+            video.file_path = str(result.file_path)
+            video.thumb_path = str(thumb_path) if has_thumb else ""
+            if result.platform != "other":
+                video.platform = result.platform
+            video.status = "ready"
+            video.error = None
+            session.add(video)
+            session.commit()
+
+        ctx.update(100, "Hoàn tất")
+
+    return handle
+
+
+def default_handlers(config: AppConfig, session_factory: SessionFactory) -> dict[str, JobHandler]:
+    return {"download": build_download_handler(config, session_factory)}
