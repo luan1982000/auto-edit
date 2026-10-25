@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.services.urls import validate_url
 
@@ -104,3 +104,47 @@ class RenderRequest(BaseModel):
     subtitle: bool = False
     voice: bool = False
     keep_original_audio: Literal["mute", "duck", "keep"] = "keep"
+
+
+class SubtitleSegmentIn(BaseModel):
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    text: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("text")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        stripped = " ".join(value.split())
+        if not stripped:
+            raise ValueError("Nội dung phụ đề không được để trống")
+        return stripped
+
+    @model_validator(mode="after")
+    def _check_timing(self) -> "SubtitleSegmentIn":
+        if self.end <= self.start:
+            raise ValueError("Thời điểm kết thúc phải sau thời điểm bắt đầu")
+        return self
+
+
+class SubtitleRead(BaseModel):
+    language: str
+    target_language: str
+    translated: bool
+    segments: list[SubtitleSegmentIn]
+
+
+class SubtitleUpdate(BaseModel):
+    segments: list[SubtitleSegmentIn] = Field(max_length=2000)
+
+
+class TranscribeRequest(BaseModel):
+    translate: bool = False
+
+
+class TranslateRequest(BaseModel):
+    target_language: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=10,
+        pattern=r"^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$",
+    )

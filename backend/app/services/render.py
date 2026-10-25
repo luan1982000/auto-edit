@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 LOGO_POSITIONS = ("tl", "tr", "bl", "br")
+SUBTITLE_FILE = re.compile(r"\A[A-Za-z0-9_.-]+\.ass\Z")
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,7 @@ class RenderOptions:
     video_width: int
     video_height: int
     logo: LogoOptions | None = None
+    subtitle_file: str | None = None
     crf: int = 20
     preset: str = "medium"
 
@@ -56,8 +59,33 @@ def _logo_filter(video_width: int, video_height: int, logo: LogoOptions) -> str:
     position = _overlay_xy(logo)
     return (
         f"[1:v]scale={width}:-2,format=rgba,colorchannelmixer=aa={opacity}[logo];"
-        f"[0:v][logo]overlay={position}[vout]"
+        f"[0:v][logo]overlay={position}"
     )
+
+
+def _subtitle_filter(name: str | None) -> str | None:
+    if name is None:
+        return None
+    if not SUBTITLE_FILE.fullmatch(name):
+        raise ValueError("subtitle file name must be a plain .ass file name")
+    return f"ass={name}"
+
+
+def _video_filter(options: RenderOptions) -> str:
+    logo_filter = (
+        _logo_filter(options.video_width, options.video_height, options.logo)
+        if options.logo is not None
+        else None
+    )
+    subtitle_filter = _subtitle_filter(options.subtitle_file)
+
+    if logo_filter and subtitle_filter:
+        return f"{logo_filter}[vlogo];[vlogo]{subtitle_filter}[vout]"
+    if logo_filter:
+        return f"{logo_filter}[vout]"
+    if subtitle_filter:
+        return f"[0:v]{subtitle_filter}[vout]"
+    raise ValueError("no video filters configured")
 
 
 def build_ffmpeg_command(
@@ -67,7 +95,8 @@ def build_ffmpeg_command(
 
     Output is written to a caller-owned temporary path and only moved into
     place by the worker after ffmpeg succeeds, so `original.mp4` is never
-    overwritten.
+    overwritten. ASS subtitle paths are relative; the worker runs ffmpeg
+    with the video folder as its working directory.
     """
     video_path = Path(video_path)
     output_path = Path(output_path)
@@ -75,13 +104,16 @@ def build_ffmpeg_command(
         raise ValueError("render output must not overwrite original video")
 
     command = ["ffmpeg", "-y", "-nostdin", "-i", str(video_path)]
-    filters = ""
     if options.logo is not None:
         command += ["-i", str(options.logo.path)]
-        filters = _logo_filter(options.video_width, options.video_height, options.logo)
 
-    if filters:
-        command += ["-filter_complex", filters, "-map", "[vout]"]
+    if options.logo is not None or options.subtitle_file is not None:
+        command += [
+            "-filter_complex",
+            _video_filter(options),
+            "-map",
+            "[vout]",
+        ]
     else:
         command += ["-map", "0:v:0"]
 

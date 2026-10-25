@@ -21,11 +21,27 @@ from app.services.downloader import DownloadError, DownloadResult, download_vide
 from app.services.fallback import FallbackError, download_via_fallback
 from app.services.ffmpeg_utils import (
     FFmpegError,
+    extract_audio,
     make_thumbnail,
     probe_video,
     run_ffmpeg_with_progress,
 )
 from app.services.render import LogoOptions, RenderOptions, build_ffmpeg_command
+from app.services.subtitles import (
+    SubtitleData,
+    SubtitleError,
+    SubtitleSegment,
+    load_subtitle_data,
+    save_subtitle_data,
+    write_ass,
+    write_srt,
+)
+from app.services.transcribe import (
+    FasterWhisperTranscriber,
+    Transcriber,
+    TranscriptionError,
+)
+from app.services.translate import TranslationError, translate_segments
 from app.services.urls import detect_platform
 from app.settings_store import get_or_create_settings
 
@@ -304,6 +320,173 @@ def build_download_handler(config: AppConfig, session_factory: SessionFactory) -
     return handle
 
 
+TranslateFn = Callable[..., list[SubtitleSegment]]
+
+
+def _persist_subtitles(video_dir: Path, data: SubtitleData) -> None:
+    save_subtitle_data(video_dir / "subtitle.json", data)
+    write_srt(video_dir / "subtitle.srt", data.segments)
+
+
+def _set_has_subtitle(session_factory: SessionFactory, video_id: str, value: bool) -> None:
+    with session_factory() as session:
+        video = session.get(Video, video_id)
+        if video is None:
+            return
+        video.has_subtitle = value
+        session.add(video)
+        session.commit()
+
+
+def _load_video_settings(
+    session_factory: SessionFactory, video_id: str
+) -> tuple[Video, str, str, float]:
+    with session_factory() as session:
+        video = session.get(Video, video_id)
+        if video is None:
+            raise TranscriptionError("Video không tồn tại trong database")
+        settings = get_or_create_settings(session)
+        model = str(settings.whisper_model)
+        target_language = str(settings.target_language)
+        return video, model, target_language, float(video.duration_sec)
+
+
+def build_transcribe_handler(
+    config: AppConfig,
+    session_factory: SessionFactory,
+    transcriber: Transcriber | None = None,
+    translate_fn: TranslateFn | None = None,
+) -> JobHandler:
+    engine = transcriber or FasterWhisperTranscriber()
+    translator = translate_fn or translate_segments
+
+    def handle(ctx: JobContext) -> None:
+        if not ctx.video_id:
+            raise TranscriptionError("Job transcribe thiếu video_id")
+        video_dir = (config.videos_dir / ctx.video_id).resolve()
+
+        video, model, target_language, duration = _load_video_settings(
+            session_factory, ctx.video_id
+        )
+        source = Path(video.file_path).resolve()
+        if not source.is_relative_to(video_dir) or not source.is_file():
+            raise TranscriptionError("Chưa có file video gốc để nhận dạng")
+
+        model = str(ctx.params.get("model") or model)
+        target_language = str(ctx.params.get("target_language") or target_language)
+        audio_path = video_dir / "audio.wav"
+
+        ctx.update(1, "Tách audio...")
+        try:
+            extract_audio(source, audio_path)
+        except FFmpegError as exc:
+            raise TranscriptionError(f"Không tách được audio từ video: {exc}") from exc
+
+        try:
+            ctx.update(5, "Đang nhận dạng giọng nói...")
+            result = engine.transcribe(
+                audio_path,
+                model_name=model,
+                duration_sec=duration,
+                on_progress=ctx.update,
+                deadline_check=ctx.check_deadline,
+            )
+        finally:
+            audio_path.unlink(missing_ok=True)
+
+        if not result.segments:
+            raise TranscriptionError("Không nhận dạng được lời nói trong video")
+
+        data = SubtitleData(
+            language=result.language,
+            target_language=result.language,
+            translated=False,
+            segments=result.segments,
+            source_segments=list(result.segments),
+        )
+        _persist_subtitles(video_dir, data)
+        _set_has_subtitle(session_factory, ctx.video_id, True)
+
+        if bool(ctx.params.get("translate")):
+            if not target_language or target_language == result.language:
+                ctx.update(100, "Ngôn ngữ đã trùng — không cần dịch")
+                return
+            ctx.update(92, "Đang dịch phụ đề...")
+            translated = translator(
+                data.source_segments,
+                target_language,
+                api_key=config.deepseek_api_key,
+                base_url=config.deepseek_base_url,
+                model=config.deepseek_model,
+            )
+            ctx.check_deadline()
+            data.segments = translated
+            data.target_language = target_language
+            data.translated = target_language != data.language
+            _persist_subtitles(video_dir, data)
+
+        ctx.update(100, "Hoàn tất")
+
+    return handle
+
+
+def build_translate_handler(
+    config: AppConfig,
+    session_factory: SessionFactory,
+    translate_fn: TranslateFn | None = None,
+) -> JobHandler:
+    translator = translate_fn or translate_segments
+
+    def handle(ctx: JobContext) -> None:
+        if not ctx.video_id:
+            raise TranslationError("Job translate thiếu video_id")
+        video_dir = (config.videos_dir / ctx.video_id).resolve()
+
+        with session_factory() as session:
+            video = session.get(Video, ctx.video_id)
+            if video is None:
+                raise TranslationError("Video không tồn tại trong database")
+            settings = get_or_create_settings(session)
+            target_language = str(
+                ctx.params.get("target_language") or settings.target_language
+            )
+
+        data = load_subtitle_data(video_dir / "subtitle.json")
+        if data is None:
+            raise TranslationError("Video chưa có phụ đề để dịch")
+        source_segments = data.source_segments or data.segments
+        if not source_segments:
+            raise TranslationError("Video chưa có phụ đề để dịch")
+
+        if not target_language or target_language == data.language:
+            data.segments = list(source_segments)
+            data.target_language = target_language or data.language
+            data.translated = False
+            _persist_subtitles(video_dir, data)
+            _set_has_subtitle(session_factory, ctx.video_id, True)
+            ctx.update(100, "Ngôn ngữ đã trùng — không cần dịch")
+            return
+
+        ctx.update(5, "Đang dịch phụ đề...")
+        translated = translator(
+            source_segments,
+            target_language,
+            api_key=config.deepseek_api_key,
+            base_url=config.deepseek_base_url,
+            model=config.deepseek_model,
+        )
+        ctx.check_deadline()
+        data.segments = translated
+        data.source_segments = list(source_segments)
+        data.target_language = target_language
+        data.translated = True
+        _persist_subtitles(video_dir, data)
+        _set_has_subtitle(session_factory, ctx.video_id, True)
+        ctx.update(100, "Hoàn tất")
+
+    return handle
+
+
 class RenderError(RuntimeError):
     """Raised when a render cannot start or ffmpeg fails."""
 
@@ -326,6 +509,10 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
             height = video.height
             duration = video.duration_sec
             logo_enabled = bool(ctx.params.get("logo", True))
+            subtitle_enabled = bool(ctx.params.get("subtitle", False))
+            subtitle_font = settings.subtitle_font
+            subtitle_size = settings.subtitle_size
+            subtitle_position = settings.subtitle_position
             logo_path = resolve_logo(config, settings.logo_path) if logo_enabled else None
             logo_options = (
                 LogoOptions(
@@ -344,6 +531,27 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
         if logo_enabled and (width <= 0 or height <= 0):
             raise RenderError("Chưa có kích thước video để đặt logo")
 
+        subtitle_file: str | None = None
+        if subtitle_enabled:
+            try:
+                subtitle_data = load_subtitle_data(video_dir / "subtitle.json")
+                if subtitle_data is None or not subtitle_data.segments:
+                    raise RenderError("Video chưa có phụ đề để burn")
+                write_ass(
+                    video_dir / "subtitle.ass",
+                    subtitle_data.segments,
+                    video_width=width,
+                    video_height=height,
+                    font=subtitle_font,
+                    size=subtitle_size,
+                    position=subtitle_position,
+                )
+            except SubtitleError as exc:
+                raise RenderError(f"Không tạo được phụ đề: {exc}") from exc
+            except OSError as exc:
+                raise RenderError(f"Không ghi được file phụ đề: {exc}") from exc
+            subtitle_file = "subtitle.ass"
+
         output = video_dir / "output_final.mp4"
         temporary = video_dir / "output_final.tmp.mp4"
         command = build_ffmpeg_command(
@@ -353,6 +561,7 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
                 video_width=width,
                 video_height=height,
                 logo=logo_options,
+                subtitle_file=subtitle_file,
             ),
         )
 
@@ -366,6 +575,7 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
                 ),
                 timeout=max(300.0, duration * 10),
                 deadline_check=ctx.check_deadline,
+                cwd=video_dir,
             )
             temporary.replace(output)
         except FFmpegError as exc:
@@ -389,7 +599,12 @@ def build_render_handler(config: AppConfig, session_factory: SessionFactory) -> 
 
 
 def default_handlers(config: AppConfig, session_factory: SessionFactory) -> dict[str, JobHandler]:
+    transcriber = FasterWhisperTranscriber()
     return {
         "download": build_download_handler(config, session_factory),
+        "transcribe": build_transcribe_handler(
+            config, session_factory, transcriber=transcriber
+        ),
+        "translate": build_translate_handler(config, session_factory),
         "render": build_render_handler(config, session_factory),
     }

@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import ROOT_DIR, AppConfig
 from app.db import get_session_factory, init_db
-from app.routers import editing, jobs, settings, system, videos
+from app.routers import editing, jobs, settings, subtitles, system, videos
 from app.worker import Worker, default_handlers
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ def create_app(config: AppConfig | None = None, start_worker: bool = True) -> Fa
 
     app.include_router(videos.router)
     app.include_router(editing.router)
+    app.include_router(subtitles.router)
     app.include_router(jobs.router)
     app.include_router(settings.router)
     app.include_router(system.router)

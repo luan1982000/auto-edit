@@ -78,6 +78,19 @@ export interface UpdateYtdlpResponse {
 export type LogoPosition = "tl" | "tr" | "bl" | "br";
 export type AudioMode = "mute" | "duck" | "keep";
 
+export interface SubtitleSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface SubtitleData {
+  language: string;
+  target_language: string;
+  translated: boolean;
+  segments: SubtitleSegment[];
+}
+
 export interface RenderOptions {
   logo: boolean;
   subtitle: boolean;
@@ -172,6 +185,26 @@ export const api = {
     request<Job>(`/api/videos/${id}/render`, {
       method: "POST",
       body: JSON.stringify(options),
+    }),
+
+  subtitle: (id: string) =>
+    request<SubtitleData>(`/api/videos/${id}/subtitle`),
+  transcribe: (id: string, translate: boolean) =>
+    request<Job>(`/api/videos/${id}/transcribe`, {
+      method: "POST",
+      body: JSON.stringify({ translate }),
+    }),
+  translate: (id: string, targetLanguage?: string) =>
+    request<Job>(`/api/videos/${id}/translate`, {
+      method: "POST",
+      body: JSON.stringify(
+        targetLanguage ? { target_language: targetLanguage } : {},
+      ),
+    }),
+  saveSubtitle: (id: string, segments: SubtitleSegment[]) =>
+    request<SubtitleData>(`/api/videos/${id}/subtitle`, {
+      method: "PUT",
+      body: JSON.stringify({ segments }),
     }),
 
   thumbUrl: (id: string) => `/api/videos/${id}/thumb`,

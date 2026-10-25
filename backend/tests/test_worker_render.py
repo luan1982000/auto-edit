@@ -9,6 +9,7 @@ from app.db import get_session_factory, init_db
 from app.ids import new_id
 from app.models import Job, Video
 from app.services.ffmpeg_utils import probe_video
+from app.services.subtitles import SubtitleData, SubtitleSegment, save_subtitle_data
 from app.settings_store import get_or_create_settings
 from app.worker import Worker, build_render_handler
 
@@ -26,7 +27,13 @@ def render_env(tmp_path: Path):
     return config, get_session_factory()
 
 
-def _make_video(config: AppConfig, session_factory, *, with_logo: bool) -> tuple[Video, Job]:
+def _make_video(
+    config: AppConfig,
+    session_factory,
+    *,
+    with_logo: bool,
+    subtitle: bool = False,
+) -> tuple[Video, Job]:
     video_id = new_id()
     video_dir = config.videos_dir / video_id
     video_dir.mkdir()
@@ -59,6 +66,18 @@ def _make_video(config: AppConfig, session_factory, *, with_logo: bool) -> tuple
     logo_path = config.assets_dir / "logo.png"
     logo_path.write_bytes(PNG_1PX)
 
+    if subtitle:
+        save_subtitle_data(
+            video_dir / "subtitle.json",
+            SubtitleData(
+                language="en",
+                target_language="vi",
+                translated=True,
+                segments=[SubtitleSegment(0.0, 0.8, "Xin chào")],
+                source_segments=[SubtitleSegment(0.0, 0.8, "Hello")],
+            ),
+        )
+
     video = Video(
         id=video_id,
         source_url="https://www.youtube.com/shorts/x",
@@ -77,7 +96,7 @@ def _make_video(config: AppConfig, session_factory, *, with_logo: bool) -> tuple
         type="render",
         params={
             "logo": with_logo,
-            "subtitle": False,
+            "subtitle": subtitle,
             "voice": False,
             "keep_original_audio": "keep",
         },
@@ -157,3 +176,46 @@ def test_failed_render_keeps_video_ready_and_cleans_temp_file(render_env) -> Non
     assert stored_video.has_output is False
     assert not (Path(video.dir_path) / "output_final.tmp.mp4").exists()
     assert not (Path(video.dir_path) / "output_final.mp4").exists()
+
+
+def test_render_handler_burns_ass_subtitles(render_env) -> None:
+    config, session_factory = render_env
+    video, job = _make_video(
+        config, session_factory, with_logo=True, subtitle=True
+    )
+    original = Path(video.file_path)
+    original_bytes = original.read_bytes()
+
+    worker = Worker(session_factory, {"render": build_render_handler(config, session_factory)})
+    worker.run_once()
+
+    stored_job = _reload(session_factory, Job, job.id)
+    assert stored_job.status == "done", stored_job.error
+    assert _reload(session_factory, Video, video.id).has_output is True
+    video_dir = Path(video.dir_path)
+    assert (video_dir / "output_final.mp4").is_file()
+    ass = (video_dir / "subtitle.ass").read_text(encoding="utf-8")
+    assert "PlayResX: 320" in ass
+    assert "PlayResY: 240" in ass
+    assert "Xin chào" in ass
+    assert original.read_bytes() == original_bytes
+    assert not (video_dir / "output_final.tmp.mp4").exists()
+
+
+def test_render_handler_requires_subtitle_data_when_requested(render_env) -> None:
+    config, session_factory = render_env
+    video, job = _make_video(config, session_factory, with_logo=False)
+    with session_factory() as session:
+        stored = session.get(Job, job.id)
+        stored.params = {**stored.params, "subtitle": True}
+        session.add(stored)
+        session.commit()
+
+    worker = Worker(session_factory, {"render": build_render_handler(config, session_factory)})
+    worker.run_once()
+
+    stored_job = _reload(session_factory, Job, job.id)
+    assert stored_job.status == "failed"
+    assert "phụ đề" in (stored_job.error or "")
+    assert _reload(session_factory, Video, video.id).has_output is False
+    assert not (Path(video.dir_path) / "output_final.tmp.mp4").exists()

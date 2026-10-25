@@ -7,9 +7,12 @@ import {
   type AudioMode,
   type Job,
   type RenderOptions,
+  type SubtitleData,
+  type SubtitleSegment,
   type Video,
 } from "../api";
 import { JobCard } from "../components/JobCard";
+import { SubtitleEditor } from "../components/SubtitleEditor";
 import {
   AlertIcon,
   ArrowLeftIcon,
@@ -123,7 +126,14 @@ export function VideoDetail() {
   });
   const [optionsTouched, setOptionsTouched] = useState(false);
   const [startingRender, setStartingRender] = useState(false);
-  const [pendingRenderId, setPendingRenderId] = useState<string | null>(null);
+  const [pendingJobId, setPendingJobId] = useState<string | null>(null);
+  const [subtitle, setSubtitle] = useState<SubtitleData | null>(null);
+  const [subtitleDraft, setSubtitleDraft] = useState<SubtitleSegment[]>([]);
+  const [subtitleDirty, setSubtitleDirty] = useState(false);
+  const [subtitleLoading, setSubtitleLoading] = useState(false);
+  const [subtitleSaving, setSubtitleSaving] = useState(false);
+  const [subtitleError, setSubtitleError] = useState("");
+  const subtitleDirtyRef = useRef(false);
   const outputState = useRef({ id: "", has: false });
 
   useEffect(() => {
@@ -198,9 +208,175 @@ export function VideoDetail() {
     outputState.current = { id: video.id, has: video.has_output };
   }, [video]);
 
+  const hasSubtitle = video?.has_subtitle ?? false;
+  const latestSubtitleDone =
+    jobs.find(
+      (job) =>
+        (job.type === "transcribe" || job.type === "translate") &&
+        job.status === "done",
+    )?.id ?? "";
+
+  useEffect(() => {
+    if (!id) return;
+    if (!hasSubtitle) {
+      setSubtitle(null);
+      setSubtitleDraft([]);
+      setSubtitleDirty(false);
+      setSubtitleLoading(false);
+      subtitleDirtyRef.current = false;
+      return;
+    }
+    if (subtitleDirtyRef.current) return;
+    let alive = true;
+    setSubtitleLoading(true);
+    api
+      .subtitle(id)
+      .then((data) => {
+        if (!alive) return;
+        setSubtitle(data);
+        setSubtitleDraft(data.segments);
+        setSubtitleError("");
+      })
+      .catch((error) => {
+        if (alive) {
+          setSubtitleError(
+            error instanceof Error ? error.message : "Không tải được phụ đề",
+          );
+        }
+      })
+      .finally(() => {
+        if (alive) setSubtitleLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [id, hasSubtitle, latestSubtitleDone]);
+
   function changeOptions(patch: Partial<RenderOptions>) {
     setOptionsTouched(true);
     setOptions((current) => ({ ...current, ...patch }));
+  }
+
+  function trackJob(job: Job) {
+    setPendingJobId(job.id);
+    setJobs((current) => [
+      job,
+      ...current.filter((item) => item.id !== job.id),
+    ]);
+  }
+
+  function markSubtitleDirty() {
+    subtitleDirtyRef.current = true;
+    setSubtitleDirty(true);
+  }
+
+  function changeSubtitle(index: number, patch: Partial<SubtitleSegment>) {
+    setSubtitleDraft((current) =>
+      current.map((segment, position) =>
+        position === index ? { ...segment, ...patch } : segment,
+      ),
+    );
+    markSubtitleDirty();
+    setSubtitleError("");
+  }
+
+  function addSubtitleRow() {
+    setSubtitleDraft((current) => {
+      const last = current[current.length - 1];
+      const start = last ? Math.max(last.end, 0) : 0;
+      return [
+        ...current,
+        {
+          start: Number(start.toFixed(1)),
+          end: Number((start + 2).toFixed(1)),
+          text: "",
+        },
+      ];
+    });
+    markSubtitleDirty();
+    setSubtitleError("");
+  }
+
+  function deleteSubtitleRow(index: number) {
+    setSubtitleDraft((current) =>
+      current.filter((_, position) => position !== index),
+    );
+    markSubtitleDirty();
+    setSubtitleError("");
+  }
+
+  async function handleSaveSubtitle() {
+    if (!id || !subtitle) return;
+    const invalidIndex = subtitleDraft.findIndex(
+      (segment) =>
+        !segment.text.trim() || segment.end <= segment.start || segment.start < 0,
+    );
+    if (invalidIndex >= 0) {
+      setSubtitleError(
+        `Dòng ${invalidIndex + 1}: kiểm tra lại mốc thời gian và nội dung`,
+      );
+      return;
+    }
+    setSubtitleSaving(true);
+    setSubtitleError("");
+    try {
+      const saved = await api.saveSubtitle(
+        id,
+        subtitleDraft.map((segment) => ({
+          start: segment.start,
+          end: segment.end,
+          text: segment.text.trim(),
+        })),
+      );
+      setSubtitle(saved);
+      setSubtitleDraft(saved.segments);
+      subtitleDirtyRef.current = false;
+      setSubtitleDirty(false);
+    } catch (error) {
+      setSubtitleError(
+        error instanceof Error ? error.message : "Không lưu được phụ đề",
+      );
+    } finally {
+      setSubtitleSaving(false);
+    }
+  }
+
+  async function handleTranscribe(translate: boolean) {
+    if (!video) return;
+    if (
+      subtitleDirtyRef.current &&
+      !window.confirm("Bỏ các thay đổi phụ đề chưa lưu?")
+    ) {
+      return;
+    }
+    setSubtitleError("");
+    try {
+      const job = await api.transcribe(video.id, translate);
+      subtitleDirtyRef.current = false;
+      setSubtitleDirty(false);
+      trackJob(job);
+    } catch (error) {
+      setSubtitleError(
+        error instanceof Error ? error.message : "Không bắt đầu được job",
+      );
+    }
+  }
+
+  async function handleTranslate() {
+    if (!video) return;
+    if (subtitleDirtyRef.current) {
+      setSubtitleError("Lưu thay đổi phụ đề trước khi dịch lại");
+      return;
+    }
+    setSubtitleError("");
+    try {
+      const job = await api.translate(video.id, settings?.target_language);
+      trackJob(job);
+    } catch (error) {
+      setSubtitleError(
+        error instanceof Error ? error.message : "Không bắt đầu được job dịch",
+      );
+    }
   }
 
   async function handleDelete() {
@@ -238,7 +414,7 @@ export function VideoDetail() {
     setRenderError("");
     try {
       const job = await api.render(video.id, options);
-      setPendingRenderId(job.id);
+      trackJob(job);
     } catch (error) {
       setRenderError(
         error instanceof Error ? error.message : "Không bắt đầu render được",
@@ -283,12 +459,14 @@ export function VideoDetail() {
   const activeJob =
     jobs.find((job) => job.status === "pending" || job.status === "running") ??
     null;
-  const pendingRender = pendingRenderId
-    ? jobs.find((job) => job.id === pendingRenderId) ?? null
+  const pendingJob = pendingJobId
+    ? jobs.find((job) => job.id === pendingJobId) ?? null
     : null;
   const visibleJob =
     activeJob ??
-    (pendingRender?.status === "failed" ? pendingRender : null);
+    (pendingJob?.status === "failed" ? pendingJob : null);
+  const subtitleBusy =
+    activeJob?.type === "transcribe" || activeJob?.type === "translate";
   const outputUrl = api.fileUrl(video.id, "output", outputVersion);
   const renderDisabled =
     startingRender || activeJob !== null || video.status !== "ready";
@@ -391,7 +569,7 @@ export function VideoDetail() {
               job={visibleJob}
               onDismiss={
                 visibleJob.status === "failed"
-                  ? () => setPendingRenderId(null)
+                  ? () => setPendingJobId(null)
                   : undefined
               }
             />
@@ -407,6 +585,24 @@ export function VideoDetail() {
               {renderError}
             </p>
           )}
+
+          <SubtitleEditor
+            data={subtitle}
+            draft={subtitleDraft}
+            targetLanguage={settings?.target_language ?? "vi"}
+            loading={subtitleLoading}
+            busy={subtitleBusy}
+            saving={subtitleSaving}
+            dirty={subtitleDirty}
+            error={subtitleError}
+            disabled={video.status !== "ready"}
+            onChange={changeSubtitle}
+            onAdd={addSubtitleRow}
+            onDelete={deleteSubtitleRow}
+            onSave={() => void handleSaveSubtitle()}
+            onTranscribe={(translate) => void handleTranscribe(translate)}
+            onTranslate={() => void handleTranslate()}
+          />
         </div>
 
         <aside className="space-y-4">

@@ -153,3 +153,50 @@ def test_run_ffmpeg_with_progress_enforces_timeout() -> None:
             on_progress=lambda _pct: None,
             timeout=0.5,
         )
+
+
+def test_extract_audio_writes_16k_mono_wav(sample_video: Path, tmp_path: Path) -> None:
+    import json
+
+    from app.services.ffmpeg_utils import extract_audio
+
+    out = tmp_path / "audio.wav"
+    assert extract_audio(sample_video, out) == out
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=sample_rate,channels,codec_name",
+            "-of",
+            "json",
+            str(out),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    stream = json.loads(probe.stdout)["streams"][0]
+    assert stream == {"sample_rate": "16000", "channels": 1, "codec_name": "pcm_s16le"}
+
+
+def test_run_ffmpeg_with_progress_runs_in_the_given_cwd(tmp_path: Path) -> None:
+    import sys
+
+    from app.services.ffmpeg_utils import run_ffmpeg_with_progress
+
+    (tmp_path / "marker.txt").write_text("ok", encoding="utf-8")
+    script = (
+        "import pathlib\n"
+        "assert pathlib.Path('marker.txt').read_text() == 'ok'\n"
+        "print('progress=end')\n"
+    )
+    run_ffmpeg_with_progress(
+        [sys.executable, "-u", "-c", script],
+        duration_sec=1.0,
+        on_progress=lambda percent: None,
+        cwd=tmp_path,
+    )

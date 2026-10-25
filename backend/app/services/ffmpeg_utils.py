@@ -41,6 +41,7 @@ def run_ffmpeg_with_progress(
     on_progress: Callable[[int], None],
     timeout: float = 900,
     deadline_check: Callable[[], None] | None = None,
+    cwd: Path | None = None,
 ) -> None:
     """Run ffmpeg and translate `-progress pipe:1` output into percentages."""
     try:
@@ -50,6 +51,7 @@ def run_ffmpeg_with_progress(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            cwd=cwd,
         )
     except FileNotFoundError as exc:
         raise FFmpegError(f"{args[0]} not found in PATH") from exc
@@ -169,6 +171,33 @@ def ensure_mp4(source: Path, target: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         source.replace(target)
     return target
+
+
+def extract_audio(video_path: Path, out_path: Path, sample_rate: int = 16000) -> Path:
+    """Extract the first audio stream as mono PCM WAV for speech recognition."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-c:a",
+            "pcm_s16le",
+            str(out_path),
+        ],
+        timeout=600,
+    )
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise FFmpegError("ffmpeg produced an empty audio file")
+    return out_path
 
 
 def make_thumbnail(

@@ -133,3 +133,52 @@ def test_command_requests_machine_readable_progress(tmp_path: Path) -> None:
     )
     assert _option(cmd, "-progress") == "pipe:1"
     assert "-nostats" in cmd
+
+
+def test_subtitle_only_uses_ass_filter(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            subtitle_file="subtitle.ass",
+        ),
+    )
+    assert _option(cmd, "-filter_complex") == "[0:v]ass=subtitle.ass[vout]"
+    assert _option(cmd, "-map") == "[vout]"
+    assert "-c:a" in cmd and _option(cmd, "-c:a") == "copy"
+
+
+def test_subtitle_is_burned_after_the_logo_overlay(tmp_path: Path) -> None:
+    cmd = build_ffmpeg_command(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        RenderOptions(
+            video_width=1080,
+            video_height=1920,
+            logo=LogoOptions(path=tmp_path / "logo.png"),
+            subtitle_file="subtitle.ass",
+        ),
+    )
+    filters = _option(cmd, "-filter_complex")
+    assert "[0:v][logo]overlay=" in filters
+    assert "[vlogo];[vlogo]ass=subtitle.ass[vout]" in filters
+    assert _option(cmd, "-map") == "[vout]"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../subtitle.ass", "/tmp/subtitle.ass", "subtitle.srt", "sub title.ass", "a:b.ass"],
+)
+def test_invalid_subtitle_file_names_are_rejected(tmp_path: Path, name: str) -> None:
+    with pytest.raises(ValueError, match="subtitle"):
+        build_ffmpeg_command(
+            tmp_path / "in.mp4",
+            tmp_path / "out.mp4",
+            RenderOptions(
+                video_width=100,
+                video_height=100,
+                subtitle_file=name,
+            ),
+        )
